@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String?
+  role         UserRole
+  createdAt    DateTime  @default(now())
+  verifiedAt   DateTime?
+
+  enrollments  Enrollment[]
+  courses      Course[]        @relation("CourseOwner")
+  liveSessions LiveSession[]   @relation("LiveSessionCreator")
+  responses    Response[]
+  attendances  Attendance[]
+  auditLogs    AuditLog[]
+}
+
+enum UserRole {
+  INSTRUCTOR
+  STUDENT
+}
+
+model Course {
+  id               String       @id @default(cuid())
+  name             String
+  term             String
+  ownerInstructor  User         @relation("CourseOwner", fields: [ownerInstructorId], references: [id])
+  ownerInstructorId String
+  joinCode         String       @unique
+
+  enrollments      Enrollment[]
+  liveSessions     LiveSession[]
+
+  createdAt        DateTime     @default(now())
+}
+
+model Enrollment {
+  id          String    @id @default(cuid())
+  course      Course    @relation(fields: [courseId], references: [id])
+  courseId    String
+  user        User      @relation(fields: [userId], references: [id])
+  userId      String
+  roleInCourse String
+
+  createdAt   DateTime  @default(now())
+
+  @@unique([courseId, userId])
+}
+
+model LiveSession {
+  id          String     @id @default(cuid())
+  course      Course     @relation(fields: [courseId], references: [id])
+  courseId    String
+  createdBy   User       @relation("LiveSessionCreator", fields: [createdById], references: [id])
+  createdById String
+  startedAt   DateTime   @default(now())
+  endedAt     DateTime?
+  sessionCode String     @unique
+
+  polls       Poll[]
+  attendances Attendance[]
+}
+
+model Poll {
+  id           String      @id @default(cuid())
+  liveSession  LiveSession @relation(fields: [liveSessionId], references: [id])
+  liveSessionId String
+  type         PollType
+  questionText String
+  optionsJson  Json?
+  isAnonymous  Boolean     @default(false)
+  allowChange  Boolean     @default(true)
+  timeLimitSec Int?
+  openedAt     DateTime?
+  closedAt     DateTime?
+
+  responses    Response[]
+}
+
+enum PollType {
+  MULTIPLE_CHOICE
+  TRUE_FALSE
+  SHORT_ANSWER
+  NUMERIC
+}
+
+model Response {
+  id          String    @id @default(cuid())
+  poll        Poll      @relation(fields: [pollId], references: [id])
+  pollId      String
+  user        User?     @relation(fields: [userId], references: [id])
+  userId      String?
+  submittedAt DateTime  @default(now())
+  answerJson  Json
+}
+
+model Attendance {
+  id           String     @id @default(cuid())
+  liveSession  LiveSession @relation(fields: [liveSessionId], references: [id])
+  liveSessionId String
+  user         User       @relation(fields: [userId], references: [id])
+  userId       String
+  presentBool  Boolean    @default(false)
+  firstJoinAt  DateTime   @default(now())
+
+  @@unique([liveSessionId, userId])
+}
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  instructor  User      @relation(fields: [instructorId], references: [id])
+  instructorId String
+  action      String
+  createdAt   DateTime  @default(now())
+  metadata    Json?
+}
+
+model VerificationToken {
+  id        String   @id @default(cuid())
+  email     String
+  token     String   @unique
+  expiresAt DateTime
+}
