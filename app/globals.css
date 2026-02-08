@@ -8,5 +8,5 @@ body {
 
 button:focus-visible,
 input:focus-visible {
-  @apply outline-none ring-2 ring-mcmaster-gold ring-offset-2 ring-offset-slate-50;
+  @apply outline-none ring-2 ring-amber-400 ring-offset-2 ring-offset-slate-50;
 }
