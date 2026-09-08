@@ -1,74 +1,56 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { route } from "@/lib/api";
 import { courseCreateSchema } from "@/lib/validation";
-import { rateLimit } from "@/lib/rateLimit";
-import { requireAuth } from "@/lib/permissions";
+import { generateUniqueCode } from "@/lib/codes";
 
-function generateJoinCode() {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
-}
-
-export async function GET(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const GET = route({}, async ({ user }) => {
   if (user.role === "INSTRUCTOR") {
     const courses = await prisma.course.findMany({
       where: { ownerInstructorId: user.id },
-      orderBy: { createdAt: "desc" }
+      orderBy: { createdAt: "desc" },
+      include: {
+        _count: { select: { enrollments: true, liveSessions: true } }
+      }
     });
     return NextResponse.json({ courses });
   }
 
   const enrollments = await prisma.enrollment.findMany({
     where: { userId: user.id },
-    include: { course: true },
-    orderBy: { createdAt: "desc" }
+    orderBy: { createdAt: "desc" },
+    include: { course: { include: { ownerInstructor: { select: { email: true } } } } }
   });
+
   return NextResponse.json({
-    courses: enrollments.map((e) => e.course)
+    courses: enrollments.map(({ course }) => ({
+      id: course.id,
+      name: course.name,
+      term: course.term,
+      instructorEmail: course.ownerInstructor.email
+    }))
   });
-}
+});
 
-export async function POST(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user || user.role !== "INSTRUCTOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+export const POST = route(
+  {
+    auth: "INSTRUCTOR",
+    body: courseCreateSchema,
+    rateLimit: { name: "create-course", limit: 30, windowMs: 60_000 }
+  },
+  async ({ body, user }) => {
+    const joinCode = await generateUniqueCode(
+      async (code) => (await prisma.course.count({ where: { joinCode: code } })) > 0
+    );
+
+    const course = await prisma.course.create({
+      data: { name: body.name, term: body.term, joinCode, ownerInstructorId: user.id }
+    });
+
+    await prisma.auditLog.create({
+      data: { instructorId: user.id, action: "CREATE_COURSE", metadata: { courseId: course.id } }
+    });
+
+    return NextResponse.json({ course: { ...course, _count: { enrollments: 0, liveSessions: 0 } } }, { status: 201 });
   }
-
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`create-course:${ip}`, 30, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
-  }
-
-  const json = await req.json().catch(() => null);
-  const parsed = courseCreateSchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-  const { name, term } = parsed.data;
-
-  const joinCode = generateJoinCode();
-  const course = await prisma.course.create({
-    data: {
-      name,
-      term,
-      joinCode,
-      ownerInstructorId: user.id
-    }
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      instructorId: user.id,
-      action: "CREATE_COURSE",
-      metadata: { courseId: course.id }
-    }
-  });
-
-  return NextResponse.json({ course }, { status: 201 });
-}
-
+);

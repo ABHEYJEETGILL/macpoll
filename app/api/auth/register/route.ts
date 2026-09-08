@@ -1,62 +1,50 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashPassword, setSessionCookie } from "@/lib/auth";
-import { rateLimit } from "@/lib/rateLimit";
+import { route, Errors } from "@/lib/api";
 import { registerSchema } from "@/lib/validation";
+import { generateCode } from "@/lib/codes";
+import { isProduction } from "@/lib/env";
 
-export async function POST(req: NextRequest) {
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`register:${ip}`, 10, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
-  }
+export const POST = route(
+  {
+    auth: "none",
+    csrf: false,
+    body: registerSchema,
+    // Loose per-IP cap: an entire class registering shares a campus NAT address.
+    rateLimit: { name: "register", limit: 100, windowMs: 60_000 }
+  },
+  async ({ body }) => {
+    const { email, password, role } = body;
 
-  const json = await req.json().catch(() => null);
-  const parsed = registerSchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-  const { email, password, role } = parsed.data;
-
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) {
-    return NextResponse.json({ error: "Email already registered" }, { status: 400 });
-  }
-
-  const passwordHash = await hashPassword(password);
-
-  const user = await prisma.user.create({
-    data: {
-      email,
-      role,
-      passwordHash
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      throw Errors.conflict("An account already exists for that email. Try signing in.");
     }
-  });
 
-  // Email verification: create token (in a real deployment, email it)
-  const token = Math.random().toString(36).slice(2, 8).toUpperCase();
-  const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
-  await prisma.verificationToken.create({
-    data: {
-      email,
-      token,
-      expiresAt
-    }
-  });
+    const user = await prisma.user.create({
+      data: { email, role, passwordHash: await hashPassword(password) }
+    });
 
-  const { csrfToken } = setSessionCookie({
-    userId: user.id,
-    role: user.role,
-    email: user.email
-  });
+    const verificationCode = generateCode();
+    await prisma.verificationToken.create({
+      data: {
+        email,
+        token: verificationCode,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+      }
+    });
 
-  return NextResponse.json(
-    {
-      user: { id: user.id, email: user.email, role: user.role, verifiedAt: user.verifiedAt },
-      verificationCode: token,
-      csrfToken
-    },
-    { status: 201 }
-  );
-}
+    const { csrfToken } = setSessionCookie({ userId: user.id, role: user.role, email: user.email });
 
+    return NextResponse.json(
+      {
+        user: { id: user.id, email: user.email, role: user.role, verifiedAt: user.verifiedAt },
+        csrfToken,
+        // Stand-in for an email provider. Never expose the code in production.
+        verificationCode: isProduction() ? undefined : verificationCode
+      },
+      { status: 201 }
+    );
+  }
+);
