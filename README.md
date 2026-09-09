@@ -1,225 +1,95 @@
-## MacPoll
+# MacPoll
 
-MacPoll is a McMaster University–only live classroom polling and attendance platform inspired by iClicker, built with **Next.js 14 (App Router, TypeScript, Tailwind)**, **PostgreSQL + Prisma**, and **Socket.io** for realtime updates.
+Live classroom polling for McMaster courses. Instructors build a reusable
+question library, run polls during a lecture, and take attendance; students
+answer on their own devices and see results update live.
 
-### Tech stack
+## Quick start
 
-- **Frontend**: Next.js 14 (App Router, TypeScript), Tailwind CSS
-- **Backend**: Next.js route handlers (`app/api/*`) with Prisma
-- **Database**: PostgreSQL
-- **Realtime**: Socket.io (separate Node server on port 4000)
-- **Auth**: Email + password (McMaster-only), simple email verification code
-- **Security**: Argon2 password hashing, httpOnly cookie sessions, CSRF token, Zod validation, in-memory rate limiting, audit log for instructor actions
-
----
-
-### Environment variables
-
-Copy `.env.example` to `.env` and adjust:
+Requires Node 20+ and a PostgreSQL 16 database (Docker provides one below).
 
 ```bash
-DATABASE_URL="postgresql://macpoll:password@localhost:5432/macpoll?schema=public"
-SESSION_SECRET="replace-with-long-random-secret"
-JWT_SECRET="replace-with-long-random-jwt-secret"
-NEXT_PUBLIC_REALTIME_URL="http://localhost:4000"
-DEMO_INSTRUCTOR_EMAIL="demo.instructor@mcmaster.ca"
-DEMO_STUDENT_EMAIL="demo.student@mcmaster.ca"
+npm install
+cp .env.example .env
+
+# Both secrets must be at least 32 characters or startup fails.
+openssl rand -hex 32   # paste as SESSION_SECRET
+openssl rand -hex 32   # paste as REALTIME_INTERNAL_SECRET
+
+docker compose up -d db   # Postgres on :5432
+npm run setup             # migrate + generate + seed demo data
+npm run dev:all           # Next.js on :3000, realtime on :4000
 ```
 
-Notes:
+Open http://localhost:3000. The seed creates a demo instructor and student
+(addresses configurable in `.env`) sharing the `DEMO_PASSWORD` you set, plus a
+course with join code `DEMO01`.
 
-- `SESSION_SECRET` must be a long random string (e.g. 64+ chars).
-- `DATABASE_URL` must point to a PostgreSQL instance you control.
+`npm run dev:all` runs **both** processes. Plain `npm run dev` starts only
+Next.js, and live poll updates will not work without the realtime server.
 
----
+## How it fits together
 
-### Setup
+Two processes share one database and one signing secret:
 
-1. **Install dependencies**
+- **Next.js** (`:3000`) serves the UI and the REST API.
+- **Realtime server** (`server/realtime-server.ts`, `:4000`) is a Socket.IO
+  server that fans events out to per-course rooms.
 
-   ```bash
-   npm install
-   ```
+Clients never emit poll events. When an instructor starts a poll, the API
+writes to the database and then POSTs to the realtime server's
+`/internal/publish` endpoint, which is gated by `REALTIME_INTERNAL_SECRET`.
+Socket handshakes require a valid signed session cookie, and joining a course
+room requires enrolment. A student therefore cannot forge a poll, and events
+for a course reach only that course's members.
 
-2. **Run Prisma migrations & seed**
+### Request handling
 
-   ```bash
-   npx prisma migrate dev --name init
-   npm run prisma:seed
-   ```
+Every endpoint goes through `route()` in `lib/api.ts`, which applies session
+lookup, role checks, CSRF verification, rate limiting and Zod body validation
+before the handler runs, so no endpoint can silently omit one. The CSRF token
+is an HMAC of the session token, so a token minted for one session cannot be
+replayed against another; `lib/client/api.ts` attaches it to every mutating
+request.
 
-3. **Start the realtime server**
+### Data model
 
-   ```bash
-   npm run realtime
-   ```
+`Question`/`QuestionOption` form a reusable instructor-owned library. A `Poll`
+is a live instance, optionally sourced from a library question and optionally
+grouped into a `ClassSession`. `PollResponse` is the student's final answer,
+with a unique `(studentId, pollId)` index making one-answer-per-student a
+database guarantee rather than a check that can race; `PollResponseLog` is an
+append-only record of every submission. Attendance is an `AttendanceSession`
+with one `AttendanceRecord` per student.
 
-   This starts the Socket.io server on `http://localhost:4000`.
+## Commands
 
-4. **Start the Next.js app**
+| Command | Purpose |
+| --- | --- |
+| `npm run dev:all` | Next.js and the realtime server together |
+| `npm run setup` | Apply migrations, generate the client, seed demo data |
+| `npm test` | Unit and API integration tests (needs `DATABASE_URL`) |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run lint` | ESLint |
+| `npm run build` | Production build |
 
-   ```bash
-   npm run dev
-   ```
+## Tests
 
-   App runs on `http://localhost:3000`.
+45 tests run against a real PostgreSQL database. Point `DATABASE_URL` at a
+throwaway database and apply migrations first:
 
----
+```bash
+export DATABASE_URL="postgresql://macpoll:macpoll@localhost:5432/macpoll_test?schema=public"
+npx prisma migrate deploy
+npm test
+```
 
-### Data model (Prisma)
+They cover the invariants that matter: enrolment is required to read or answer
+a poll, one answer per student, options must belong to the poll, draft polls
+stay hidden from students, correct answers never reach a student, CSRF tokens
+are session-bound, and CSV export neutralises formula injection.
 
-Key models (simplified):
+## Configuration
 
-- `User(id, email, role, createdAt, verifiedAt, passwordHash)`
-- `Course(id, name, term, ownerInstructorId, joinCode)`
-- `Enrollment(id, courseId, userId, roleInCourse)`
-- `LiveSession(id, courseId, createdBy, startedAt, endedAt, sessionCode)`
-- `Poll(id, liveSessionId, type, questionText, optionsJson, isAnonymous, allowChange, timeLimitSec, openedAt, closedAt)`
-- `Response(id, pollId, userId nullable, submittedAt, answerJson)`
-- `Attendance(id, liveSessionId, userId, presentBool, firstJoinAt)`
-- `AuditLog(id, instructorId, action, createdAt, metadata)`
-- `VerificationToken` for email verification codes
-
-The schema is defined in `prisma/schema.prisma`.
-
----
-
-### Auth flow
-
-- Registration (`/auth/register`):
-  - Enforces `@mcmaster.ca` emails (via Zod).
-  - Stores Argon2 password hash.
-  - Creates a `VerificationToken` row with a short code (shown in UI for demo).
-  - Starts a session via httpOnly cookie.
-- Email verification (`/api/auth/verify-email`):
-  - Confirms the verification code and sets `verifiedAt` on `User`.
-- Login (`/auth/login`):
-  - Verifies credentials (email + password).
-  - Issues an httpOnly `macpoll_session` cookie with a signed payload.
-- CSRF:
-  - A CSRF token cookie is issued on login/registration and returned to the client; non-GET APIs can be extended to require `x-macpoll-csrf` header.
-
-Sessions are stored as signed tokens in cookies (no localStorage).
-
----
-
-### Courses, sessions, polling, attendance
-
-- **Courses**
-  - Instructors create courses via `/api/courses` (join code auto-generated).
-  - Students join via `/api/courses/join` with the join code.
-- **Live sessions**
-  - Instructors start sessions per course via `/api/courses/[courseId]/sessions`.
-  - Students join a live session with a session code via `/api/sessions/join`.
-  - Joining a session creates an `Attendance` row (not yet marked present).
-- **Polling**
-  - Instructors create polls via `/api/polls` while in a live session.
-  - Polls support MC, True/False, short answer, numeric.
-  - Students submit responses via `/api/responses`.
-  - Attendance is marked present after at least one response in the session.
-  - Instructor view fetches live aggregates via `/api/instructor/session/[sessionId]/results`.
-- **Attendance export**
-  - `/api/attendance/export?liveSessionId=...` returns a CSV with attendance + basic poll stats.
-
----
-
-### Realtime (Socket.io)
-
-`server/realtime-server.ts` exposes a Socket.io server that:
-
-- Supports `join-session` / `leave-session` events by `sessionCode`.
-- Broadcasts:
-  - `presence-update` with the current connected count.
-  - `poll-opened`, `poll-closed`, and `response-submitted` events to all clients in a session room.
-
-The frontend connects using `NEXT_PUBLIC_REALTIME_URL`.
-
----
-
-### UI overview
-
-- `Home` (`/`):
-  - Landing page with instructor/student entry points.
-- `Auth`:
-  - `/auth/register`: McMaster-only register + verification code.
-  - `/auth/login`: login with email/password.
-- `Dashboard` (`/dashboard`):
-  - Instructors: create courses, view join codes, start sessions, navigate to live instructor view.
-  - Students: join courses via join code, navigate to student join/session views.
-- `Instructor live session` (`/instructor/session/[sessionId]`):
-  - Shows course + session code.
-  - Lets instructors create/launch polls.
-  - Shows live bar-chart–style aggregates.
-  - Shows connected student count.
-- `Student live session` (`/student/session/[sessionId]`):
-  - Mobile-first single column UI: shows current poll, quick tap options for MC/True-False, minimal text input for text/numeric.
-  - Shows clear states: waiting for poll, poll active, submitted.
-
-Colours use McMaster branding:
-
-- Maroon: `#7A003C`
-- Gold: `#FDBF57`
-
-Accessibility:
-
-- Keyboard-focusable controls, visible focus outlines, high-contrast text on buttons.
-
----
-
-### Demo data & accounts
-
-`prisma/seed.ts` creates:
-
-- **Demo instructor**
-  - Email: value of `DEMO_INSTRUCTOR_EMAIL` (default: `demo.instructor@mcmaster.ca`)
-  - Password: `password123`
-- **Demo student**
-  - Email: value of `DEMO_STUDENT_EMAIL` (default: `demo.student@mcmaster.ca`)
-  - Password: `password123`
-- A demo course (`COMP SCI 1JC3`, Winter 2026) with:
-  - Join code: `MAC123`
-  - One demo live session: session code `DEMO01`
-  - One demo multiple-choice poll.
-
----
-
-### Running a demo lecture (2 browser windows)
-
-1. **Start services**
-   - Ensure PostgreSQL is running and `.env` is configured.
-   - Run migrations and seed (once): `npx prisma migrate dev && npm run prisma:seed`
-   - Start realtime server: `npm run realtime`
-   - Start Next app: `npm run dev`
-
-2. **Open two browsers / profiles**
-   - **Window A (Instructor)**:
-     - Go to `http://localhost:3000/auth/login`
-     - Log in with demo instructor (e.g. `demo.instructor@mcmaster.ca` / `password123`).
-     - Go to `Dashboard`, open the existing demo course and session, or create a new one.
-     - Click “Start session” then “Open dashboard” to view `/instructor/session/[sessionId]`.
-   - **Window B (Student)**:
-     - Go to `http://localhost:3000/auth/login`
-     - Log in with demo student (e.g. `demo.student@mcmaster.ca` / `password123`).
-     - From dashboard, join the demo course using `MAC123` if needed.
-     - Navigate to `Join live session`, enter the visible `sessionCode` (e.g. `DEMO01`), and you’ll be redirected to `/student/session/[sessionId]`.
-
-3. **Simulate a live poll**
-   - In the instructor window, create a multiple-choice question and click **Launch poll**.
-   - The student window should show the active poll; tap to answer, then submit.
-   - Watch the instructor’s “Live results” section update in realtime as responses come in.
-   - Export attendance and results with the “Export CSV” link in the instructor dashboard.
-
----
-
-### Notes & extensions
-
-- For production, you should:
-  - Back the realtime server and Next.js app with proper TLS and CORS config.
-  - Replace the demo verification code display with a real email provider.
-  - Persist rate-limit buckets in Redis or similar.
-  - Harden CSRF enforcement on all non-GET endpoints that mutate state.
-- The codebase is structured for readability and extension:
-  - `app/api/*`: typed route handlers with Zod validation and strict authorization checks.
-  - `lib/*`: auth, validation, prisma client, permissions, and rate limiting helpers.
-  - `app/*`: App Router pages for auth, dashboards, and session views.
-
+See `.env.example` for the full list. `lib/env.ts` validates configuration with
+Zod on first use and fails loudly; there are no insecure fallback secrets.

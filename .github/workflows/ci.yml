@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: macpoll
+          POSTGRES_PASSWORD: macpoll
+          POSTGRES_DB: macpoll_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U macpoll"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://macpoll:macpoll@localhost:5432/macpoll_test?schema=public
+      SESSION_SECRET: ci-session-secret-that-is-long-enough-000000
+      REALTIME_INTERNAL_SECRET: ci-realtime-secret-that-is-long-enough-0000
+      REALTIME_INTERNAL_URL: http://localhost:4000
+      REALTIME_ALLOWED_ORIGINS: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build

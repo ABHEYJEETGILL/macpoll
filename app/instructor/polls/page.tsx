@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
-import { Plus, Loader2, Play, Square, Trash2, BarChart3, Eye, EyeOff, Image, BookOpen } from 'lucide-react'
+import { Plus, Loader2, Play, Square, Trash2, BarChart3, Eye, EyeOff, Image as ImageIcon, BookOpen } from 'lucide-react'
 import { useSocket } from '@/hooks/useSocket'
 import { apiFetch, ApiRequestError } from '@/lib/client/api'
 
@@ -257,7 +257,7 @@ export default function InstructorPollsPage() {
           {/* Image URL */}
           <div>
             <label className="flex items-center gap-2 label">
-              <Image size={13} /> Question Image URL (optional)
+              <ImageIcon size={13} /> Question Image URL (optional)
             </label>
             <input className="input" type="url" placeholder="https://example.com/diagram.png"
               value={form.imageUrl} onChange={(e) => setField('imageUrl', e.target.value)} />
@@ -371,7 +371,7 @@ export default function InstructorPollsPage() {
                     </span>
                     {poll.imageUrl && (
                       <span className="flex items-center gap-1 text-xs text-blue-600 badge bg-blue-50">
-                        <Image size={10} /> Image
+                        <ImageIcon size={10} /> Image
                       </span>
                     )}
                   </div>
