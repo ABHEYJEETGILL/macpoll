@@ -59,58 +59,61 @@ export default function DashboardPage() {
   }
 
   async function handleCreateCourse() {
-    setStatus(null);
-    const res = await fetch("/api/courses", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: courseName, term: courseTerm })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus(data.error ?? "Failed to create course");
-      return;
-    }
-    setCourses((prev) => [data.course, ...prev]);
-    setCourseName("");
-    setCourseTerm("");
+  setStatus(null);
+  const res = await fetch("/api/courses", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: courseName, term: courseTerm })
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) {
+    setStatus(data.error ?? "Failed to create course");
+    return;
   }
+  setCourses((prev) => [data.course, ...prev]);
+  setCourseName("");
+  setCourseTerm("");
+}
 
-  async function handleJoinCourse() {
-    setStatus(null);
-    const res = await fetch("/api/courses/join", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ joinCode })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus(data.error ?? "Failed to join course");
-      return;
-    }
-    setCourses((prev) => [data.course, ...prev]);
-    setJoinCode("");
+async function handleJoinCourse() {
+  setStatus(null);
+  const res = await fetch("/api/courses/join", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ joinCode })
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) {
+    setStatus(data.error ?? "Failed to join course");
+    return;
   }
+  setCourses((prev) => [data.course, ...prev]);
+  setJoinCode("");
+}
 
-  async function handleCreateSession(courseId: string) {
-    setStatus(null);
-    const res = await fetch(`/api/courses/${courseId}/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus(data.error ?? "Failed to create session");
-      return;
-    }
-    setSelectedCourseId(courseId);
-    await refreshSessions(courseId);
-    setStatus(`Session started with code ${data.session.sessionCode}`);
+async function handleCreateSession(courseId: string) {
+  setStatus(null);
+  const res = await fetch(`/api/courses/${courseId}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({})
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) {
+    setStatus(data.error ?? "Failed to create session");
+    return;
   }
+  setSelectedCourseId(courseId);
+  await refreshSessions(courseId);
+  setStatus(`Session started with code ${data.session.sessionCode}`);
+}
 
   if (!user) {
     return (
-      <div className="mx-auto max-w-md px-4 py-10">
+      <div className="max-w-md px-4 py-10 mx-auto">
         <p className="text-sm text-slate-600">Loading...</p>
       </div>
     );
@@ -119,8 +122,8 @@ export default function DashboardPage() {
   const isInstructor = user.role === "INSTRUCTOR";
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
-      <div className="mb-6 flex items-center justify-between">
+    <div className="max-w-5xl px-4 py-8 mx-auto">
+      <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-semibold text-mcmaster-maroon">Dashboard</h1>
           <p className="text-sm text-slate-600">
@@ -139,7 +142,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid gap-6 md:grid-cols-3">
-        <section className="md:col-span-2 rounded-lg border bg-white p-4 shadow-sm">
+        <section className="p-4 bg-white border rounded-lg shadow-sm md:col-span-2">
           <h2 className="mb-3 text-sm font-semibold text-slate-800">Courses</h2>
           {courses.length === 0 && (
             <p className="text-sm text-slate-600">No courses yet. Create or join one below.</p>
@@ -148,7 +151,7 @@ export default function DashboardPage() {
             {courses.map((course) => (
               <li
                 key={course.id}
-                className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
+                className="flex items-center justify-between px-3 py-2 text-sm border rounded-md"
               >
                 <div>
                   <div className="font-medium text-slate-900">{course.name}</div>
@@ -171,7 +174,7 @@ export default function DashboardPage() {
                   ) : (
                     <Link
                       href={`/student/join?courseId=${course.id}`}
-                      className="text-xs font-medium text-mcmaster-maroon underline"
+                      className="text-xs font-medium underline text-mcmaster-maroon"
                     >
                       Join live session
                     </Link>
@@ -191,7 +194,7 @@ export default function DashboardPage() {
           </ul>
         </section>
 
-        <section className="space-y-4 rounded-lg border bg-white p-4 shadow-sm">
+        <section className="p-4 space-y-4 bg-white border rounded-lg shadow-sm">
           {isInstructor ? (
             <>
               <h2 className="text-sm font-semibold text-slate-800">Create course</h2>
@@ -231,13 +234,13 @@ export default function DashboardPage() {
       </div>
 
       {selectedCourseId && sessions.length > 0 && (
-        <section className="mt-8 rounded-lg border bg-white p-4 shadow-sm">
+        <section className="p-4 mt-8 bg-white border rounded-lg shadow-sm">
           <h2 className="mb-3 text-sm font-semibold text-slate-800">Live sessions</h2>
           <ul className="space-y-2 text-sm">
             {sessions.map((s) => (
               <li
                 key={s.id}
-                className="flex items-center justify-between rounded-md border px-3 py-2"
+                className="flex items-center justify-between px-3 py-2 border rounded-md"
               >
                 <div>
                   <div className="font-mono text-xs text-slate-700">
@@ -251,14 +254,14 @@ export default function DashboardPage() {
                   {isInstructor ? (
                     <Link
                       href={`/instructor/session/${s.id}`}
-                      className="text-xs font-medium text-mcmaster-maroon underline"
+                      className="text-xs font-medium underline text-mcmaster-maroon"
                     >
                       Open dashboard
                     </Link>
                   ) : (
                     <Link
                       href={`/student/session/${s.id}`}
-                      className="text-xs font-medium text-mcmaster-maroon underline"
+                      className="text-xs font-medium underline text-mcmaster-maroon"
                     >
                       Join
                     </Link>
@@ -266,7 +269,7 @@ export default function DashboardPage() {
                   {isInstructor && (
                     <a
                       href={`/api/attendance/export?liveSessionId=${s.id}`}
-                      className="text-xs text-slate-600 underline"
+                      className="text-xs underline text-slate-600"
                     >
                       Export CSV
                     </a>

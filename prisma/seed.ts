@@ -1,81 +1,77 @@
-import { PrismaClient, UserRole } from "@prisma/client";
-import { hashPassword } from "../lib/auth";
-
+import { PrismaClient } from "@prisma/client";
+import argon2 from "argon2";
+ 
 const prisma = new PrismaClient();
-
+ 
 async function main() {
-  const demoInstructorEmail = process.env.DEMO_INSTRUCTOR_EMAIL || "demo.instructor@mcmaster.ca";
-  const demoStudentEmail = process.env.DEMO_STUDENT_EMAIL || "demo.student@mcmaster.ca";
-
-  const instructorPassword = await hashPassword("password123");
-  const studentPassword = await hashPassword("password123");
-
+  const instructorEmail =
+    process.env.DEMO_INSTRUCTOR_EMAIL ?? "demo.instructor@mcmaster.ca";
+  const studentEmail =
+    process.env.DEMO_STUDENT_EMAIL ?? "demo.student@mcmaster.ca";
+  const demoPassword = "demo1234";
+ 
+  const passwordHash = await argon2.hash(demoPassword);
+ 
+  // ── Instructor ──────────────────────────────────────────────────────────────
   const instructor = await prisma.user.upsert({
-    where: { email: demoInstructorEmail },
+    where: { email: instructorEmail },
     update: {},
     create: {
-      email: demoInstructorEmail,
-      role: UserRole.INSTRUCTOR,
-      passwordHash: instructorPassword,
+      email: instructorEmail,
+      passwordHash,
+      role: "INSTRUCTOR",
       verifiedAt: new Date()
     }
   });
-
+ 
+  // ── Student ─────────────────────────────────────────────────────────────────
   const student = await prisma.user.upsert({
-    where: { email: demoStudentEmail },
+    where: { email: studentEmail },
     update: {},
     create: {
-      email: demoStudentEmail,
-      role: UserRole.STUDENT,
-      passwordHash: studentPassword,
+      email: studentEmail,
+      passwordHash,
+      role: "STUDENT",
       verifiedAt: new Date()
     }
   });
-
-  const course = await prisma.course.create({
-    data: {
-      name: "COMP SCI 1JC3",
-      term: "Winter 2026",
-      ownerInstructorId: instructor.id,
-      joinCode: "MAC123"
-    }
+ 
+  // ── Demo course ─────────────────────────────────────────────────────────────
+  let course = await prisma.course.findFirst({
+    where: { ownerInstructorId: instructor.id }
   });
-
-  await prisma.enrollment.create({
-    data: {
+ 
+  if (!course) {
+    course = await prisma.course.create({
+      data: {
+        name: "COMPSCI 1JC3 – Introduction to Computational Thinking",
+        term: "Winter 2026",
+        joinCode: "DEMO01",
+        ownerInstructorId: instructor.id
+      }
+    });
+  }
+ 
+  // ── Enrol student ───────────────────────────────────────────────────────────
+  await prisma.enrollment.upsert({
+    where: { courseId_userId: { courseId: course.id, userId: student.id } },
+    update: {},
+    create: {
       courseId: course.id,
       userId: student.id,
       roleInCourse: "STUDENT"
     }
   });
-
-  const session = await prisma.liveSession.create({
-    data: {
-      courseId: course.id,
-      createdById: instructor.id,
-      sessionCode: "DEMO01"
-    }
-  });
-
-  await prisma.poll.create({
-    data: {
-      liveSessionId: session.id,
-      type: "MULTIPLE_CHOICE",
-      questionText: "How confident are you with TypeScript?",
-      optionsJson: ["Very", "Somewhat", "Not yet"],
-      isAnonymous: false,
-      allowChange: true,
-      openedAt: new Date()
-    }
-  });
+ 
+  console.log("✅ Seed complete");
+  console.log(`   Instructor: ${instructorEmail} / ${demoPassword}`);
+  console.log(`   Student:    ${studentEmail} / ${demoPassword}`);
+  console.log(`   Course join code: ${course.joinCode}`);
 }
-
+ 
 main()
   .catch((e) => {
     console.error(e);
     process.exit(1);
   })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
-
+  .finally(() => prisma.$disconnect());

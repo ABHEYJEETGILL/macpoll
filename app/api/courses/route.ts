@@ -33,10 +33,11 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user || user.role !== "INSTRUCTOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  try {
+    const user = await requireAuth(req);
+    if (!user || user.role !== "INSTRUCTOR") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
   const ip = req.headers.get("x-forwarded-for") ?? "local";
   const rl = rateLimit(`create-course:${ip}`, 30, 60_000);
@@ -70,5 +71,10 @@ export async function POST(req: NextRequest) {
   });
 
   return NextResponse.json({ course }, { status: 201 });
+  } catch (err) {
+    console.error("[POST /api/courses]", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+
 }
 

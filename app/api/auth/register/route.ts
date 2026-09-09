@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { hashPassword, setSessionCookie } from "@/lib/auth";
+import { hashPassword, setSessionCookie, clearSessionCookies } from "@/lib/auth";
 import { rateLimit } from "@/lib/rateLimit";
 import { registerSchema } from "@/lib/validation";
 
@@ -26,26 +26,18 @@ export async function POST(req: NextRequest) {
   const passwordHash = await hashPassword(password);
 
   const user = await prisma.user.create({
-    data: {
-      email,
-      role,
-      passwordHash
-    }
+    data: { email, role, passwordHash }
   });
 
-  // Email verification: create token (in a real deployment, email it)
   const token = Math.random().toString(36).slice(2, 8).toUpperCase();
   const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
   await prisma.verificationToken.create({
-    data: {
-      email,
-      token,
-      expiresAt
-    }
+    data: { email, token, expiresAt }
   });
 
+  clearSessionCookies();
   const { csrfToken } = setSessionCookie({
-    userId: user.id,
+    id: user.id,
     role: user.role,
     email: user.email
   });
@@ -59,4 +51,3 @@ export async function POST(req: NextRequest) {
     { status: 201 }
   );
 }
-

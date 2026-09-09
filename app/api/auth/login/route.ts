@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { verifyPassword, setSessionCookie } from "@/lib/auth";
+import { verifyPassword, setSessionCookie, clearSessionCookies } from "@/lib/auth";
 import { loginSchema } from "@/lib/validation";
 import { rateLimit } from "@/lib/rateLimit";
 
@@ -28,8 +28,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
+  clearSessionCookies();
   const { csrfToken } = setSessionCookie({
-    userId: user.id,
+    id: user.id,
     role: user.role,
     email: user.email
   });
@@ -42,4 +43,3 @@ export async function POST(req: NextRequest) {
     { status: 200 }
   );
 }
-

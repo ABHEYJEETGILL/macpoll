@@ -1,58 +1,61 @@
 import { z } from "zod";
-
-export const emailSchema = z
+ 
+const mcmasterEmail = z
   .string()
-  .email()
-  .refine((email) => email.toLowerCase().endsWith("@mcmaster.ca"), {
-    message: "Only @mcmaster.ca emails are allowed"
+  .email("Must be a valid email")
+  .refine((v) => v.toLowerCase().endsWith("@mcmaster.ca"), {
+    message: "Must be a @mcmaster.ca email address"
   });
-
-export const passwordSchema = z
-  .string()
-  .min(8, "Password must be at least 8 characters")
-  .max(128, "Password is too long");
-
+ 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+ 
 export const registerSchema = z.object({
-  email: emailSchema,
-  password: passwordSchema,
+  email: mcmasterEmail,
+  password: z.string().min(8, "Password must be at least 8 characters"),
   role: z.enum(["INSTRUCTOR", "STUDENT"])
 });
-
+ 
 export const loginSchema = z.object({
-  email: emailSchema,
-  password: z.string()
+  email: mcmasterEmail,
+  password: z.string().min(1, "Password is required")
 });
-
+ 
+// ── Courses ───────────────────────────────────────────────────────────────────
+ 
 export const courseCreateSchema = z.object({
-  name: z.string().min(2).max(120),
-  term: z.string().min(2).max(50)
+  name: z.string().min(1, "Course name is required").max(120),
+  term: z.string().min(1, "Term is required").max(60)
 });
-
+ 
 export const joinCourseSchema = z.object({
-  joinCode: z.string().min(4).max(12)
+  joinCode: z.string().min(1, "Join code is required").max(16).toUpperCase()
 });
-
+ 
+// ── Live sessions ─────────────────────────────────────────────────────────────
+ 
 export const liveSessionCreateSchema = z.object({
-  courseId: z.string().cuid()
+  courseId: z.string().cuid("Invalid course ID")
 });
-
+ 
+// ── Polls ─────────────────────────────────────────────────────────────────────
+ 
 export const pollCreateSchema = z.object({
-  liveSessionId: z.string().cuid(),
+  liveSessionId: z.string().cuid("Invalid session ID"),
   type: z.enum(["MULTIPLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER", "NUMERIC"]),
-  questionText: z.string().min(3).max(500),
-  options: z.array(z.string().min(1).max(120)).max(6).optional(),
+  questionText: z.string().min(1, "Question is required").max(500),
+  options: z
+    .array(z.string().min(1).max(200))
+    .min(2, "At least 2 options required")
+    .max(8)
+    .optional(),
   isAnonymous: z.boolean().default(false),
   allowChange: z.boolean().default(true),
-  timeLimitSec: z.number().int().positive().max(3600).optional()
+  timeLimitSec: z.number().int().positive().optional()
 });
-
+ 
+// ── Responses ─────────────────────────────────────────────────────────────────
+ 
 export const responseSubmitSchema = z.object({
-  pollId: z.string().cuid(),
-  answer: z.union([
-    z.string().max(240),
-    z.number(),
-    z.array(z.string()),
-    z.boolean()
-  ])
+  pollId: z.string().cuid("Invalid poll ID"),
+  answer: z.union([z.string().min(1).max(1000), z.number()])
 });
-

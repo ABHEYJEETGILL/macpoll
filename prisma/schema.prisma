@@ -1,131 +1,293 @@
+// MacPoll Prisma Schema — Prisma 7
+// Connection URL is in prisma.config.js
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
-model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  passwordHash String?
-  role         UserRole
-  createdAt    DateTime  @default(now())
-  verifiedAt   DateTime?
-
-  enrollments  Enrollment[]
-  courses      Course[]        @relation("CourseOwner")
-  liveSessions LiveSession[]   @relation("LiveSessionCreator")
-  responses    Response[]
-  attendances  Attendance[]
-  auditLogs    AuditLog[]
-}
-
-enum UserRole {
-  INSTRUCTOR
+enum Role {
   STUDENT
-}
-
-model Course {
-  id               String       @id @default(cuid())
-  name             String
-  term             String
-  ownerInstructor  User         @relation("CourseOwner", fields: [ownerInstructorId], references: [id])
-  ownerInstructorId String
-  joinCode         String       @unique
-
-  enrollments      Enrollment[]
-  liveSessions     LiveSession[]
-
-  createdAt        DateTime     @default(now())
-}
-
-model Enrollment {
-  id          String    @id @default(cuid())
-  course      Course    @relation(fields: [courseId], references: [id])
-  courseId    String
-  user        User      @relation(fields: [userId], references: [id])
-  userId      String
-  roleInCourse String
-
-  createdAt   DateTime  @default(now())
-
-  @@unique([courseId, userId])
-}
-
-model LiveSession {
-  id          String     @id @default(cuid())
-  course      Course     @relation(fields: [courseId], references: [id])
-  courseId    String
-  createdBy   User       @relation("LiveSessionCreator", fields: [createdById], references: [id])
-  createdById String
-  startedAt   DateTime   @default(now())
-  endedAt     DateTime?
-  sessionCode String     @unique
-
-  polls       Poll[]
-  attendances Attendance[]
-}
-
-model Poll {
-  id           String      @id @default(cuid())
-  liveSession  LiveSession @relation(fields: [liveSessionId], references: [id])
-  liveSessionId String
-  type         PollType
-  questionText String
-  optionsJson  Json?
-  isAnonymous  Boolean     @default(false)
-  allowChange  Boolean     @default(true)
-  timeLimitSec Int?
-  openedAt     DateTime?
-  closedAt     DateTime?
-
-  responses    Response[]
+  INSTRUCTOR
+  ADMIN
 }
 
 enum PollType {
   MULTIPLE_CHOICE
   TRUE_FALSE
   SHORT_ANSWER
-  NUMERIC
 }
 
-model Response {
-  id          String    @id @default(cuid())
-  poll        Poll      @relation(fields: [pollId], references: [id])
-  pollId      String
-  user        User?     @relation(fields: [userId], references: [id])
-  userId      String?
-  submittedAt DateTime  @default(now())
-  answerJson  Json
+enum PollStatus {
+  DRAFT
+  ACTIVE
+  ENDED
 }
 
-model Attendance {
-  id           String     @id @default(cuid())
-  liveSession  LiveSession @relation(fields: [liveSessionId], references: [id])
-  liveSessionId String
-  user         User       @relation(fields: [userId], references: [id])
-  userId       String
-  presentBool  Boolean    @default(false)
-  firstJoinAt  DateTime   @default(now())
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  name              String
+  password          String
+  role              Role      @default(STUDENT)
+  emailVerified     Boolean   @default(false)
+  verificationToken String?
+  resetToken        String?
+  resetTokenExpiry  DateTime?
+  suspended         Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  @@unique([liveSessionId, userId])
+  coursesTeaching  Course[]
+  enrollments      Enrollment[]
+  pollResponses    PollResponse[]
+  pollResponseLogs PollResponseLog[]
+  attendanceRecs   AttendanceRecord[]
+  questions        Question[]
+  adminActions     AdminAction[]       @relation("AdminActor")
+  actionsTaken     AdminAction[]       @relation("ActionTarget")
+
+  @@index([email])
+  @@index([role])
 }
 
-model AuditLog {
-  id          String    @id @default(cuid())
-  instructor  User      @relation(fields: [instructorId], references: [id])
+model Course {
+  id          String   @id @default(cuid())
+  name        String
+  code        String
+  description String?
+  semester    String?
+  joinCode    String   @unique
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
   instructorId String
-  action      String
-  createdAt   DateTime  @default(now())
-  metadata    Json?
+  instructor   User   @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+
+  enrollments        Enrollment[]
+  classSessions      ClassSession[]
+  polls              Poll[]
+  attendanceSessions AttendanceSession[]
+
+  @@index([instructorId])
+  @@index([joinCode])
 }
 
-model VerificationToken {
-  id        String   @id @default(cuid())
-  email     String
-  token     String   @unique
-  expiresAt DateTime
+model Enrollment {
+  id         String   @id @default(cuid())
+  enrolledAt DateTime @default(now())
+
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, courseId])
+  @@index([studentId])
+  @@index([courseId])
 }
+
+// Groups polls into a single lecture/class meeting
+model ClassSession {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  date        DateTime @default(now())
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  polls Poll[]
+
+  @@index([courseId])
+  @@index([isActive])
+}
+
+// Reusable question bank — owned by instructor, not tied to a course
+model Question {
+  id                    String   @id @default(cuid())
+  title                 String
+  body                  String
+  type                  PollType
+  imageUrl              String?
+  showContentToStudents Boolean  @default(true)
+  points                Int      @default(1)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  instructorId String
+  instructor   User   @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+
+  options QuestionOption[]
+  polls   Poll[]
+
+  @@index([instructorId])
+}
+
+model QuestionOption {
+  id         String  @id @default(cuid())
+  text       String
+  orderIndex Int     @default(0)
+  isCorrect  Boolean @default(false)
+
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+}
+
+// Live poll instance
+model Poll {
+  id           String     @id @default(cuid())
+  title        String
+  question     String
+  type         PollType
+  status       PollStatus @default(DRAFT)
+  timerSeconds Int?
+  hideResults  Boolean    @default(false)
+  orderIndex   Int        @default(0)
+
+  // Image attached to this poll question
+  imageUrl String?
+
+  // When false: students see "A poll is running — look at the screen"
+  // instead of the question text and image on their device.
+  // Useful when the instructor wants to project the question.
+  showContentToStudents Boolean @default(true)
+
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  sessionId String?
+  session   ClassSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  questionId String?
+  sourceQuestion Question? @relation(fields: [questionId], references: [id], onDelete: SetNull)
+
+  options      PollOption[]
+  responses    PollResponse[]
+  responseLogs PollResponseLog[]
+
+  @@index([courseId])
+  @@index([sessionId])
+  @@index([status])
+}
+
+model PollOption {
+  id         String  @id @default(cuid())
+  text       String
+  orderIndex Int     @default(0)
+  isCorrect  Boolean @default(false)
+
+  pollId String
+  poll   Poll   @relation(fields: [pollId], references: [id], onDelete: Cascade)
+
+  responses    PollResponse[]
+  responseLogs PollResponseLog[]
+
+  @@index([pollId])
+}
+
+// Final response — one per student per poll (enforced by unique constraint)
+model PollResponse {
+  id          String   @id @default(cuid())
+  shortAnswer String?
+  submittedAt DateTime @default(now())
+
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  pollId String
+  poll   Poll   @relation(fields: [pollId], references: [id], onDelete: Cascade)
+
+  optionId String?
+  option   PollOption? @relation(fields: [optionId], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, pollId])
+  @@index([pollId])
+  @@index([studentId])
+}
+
+// Audit log — every vote attempt, timestamps preserved, never overwritten
+model PollResponseLog {
+  id          String   @id @default(cuid())
+  shortAnswer String?
+  submittedAt DateTime @default(now())
+
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  pollId String
+  poll   Poll   @relation(fields: [pollId], references: [id], onDelete: Cascade)
+
+  optionId String?
+  option   PollOption? @relation(fields: [optionId], references: [id], onDelete: SetNull)
+
+  @@index([pollId])
+  @@index([studentId])
+}
+
+model AttendanceSession {
+  id           String    @id @default(cuid())
+  label        String
+  openedAt     DateTime  @default(now())
+  closedAt     DateTime?
+  durationMins Int?
+  isOpen       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  records AttendanceRecord[]
+
+  @@index([courseId])
+  @@index([isOpen])
+}
+
+model AttendanceRecord {
+  id       String   @id @default(cuid())
+  markedAt DateTime @default(now())
+
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  sessionId String
+  session   AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, sessionId])
+  @@index([sessionId])
+  @@index([studentId])
+}
+
+model AdminAction {
+  id             String   @id @default(cuid())
+  action         String
+  reason         String?
+  createdAt      DateTime @default(now())
+  targetCourseId String?
+
+  actorId String
+  actor   User   @relation("AdminActor", fields: [actorId], references: [id])
+
+  targetUserId String?
+  targetUser   User?   @relation("ActionTarget", fields: [targetUserId], references: [id])
+
+  @@index([actorId])
+  @@index([targetUserId])
+}
+
+
