@@ -15,7 +15,7 @@ interface Poll {
   imageUrl?: string; showContentToStudents: boolean
   course: { code: string }
   options: PollOption[]
-  _count: { responses: number }
+  _count?: { responses: number }
 }
 interface LibQuestion {
   id: string; title: string; body: string; type: string
@@ -53,7 +53,8 @@ export default function InstructorPollsPage() {
     const cs: Course[] = await cRes.json()
     setCourses(cs)
 
-    const useCid = cid ?? selCourse ?? cs[0]?.id
+    // `??` would keep the initial empty string and abort the load below.
+    const useCid = cid || selCourse || cs[0]?.id
     if (!useCid) { setLoading(false); return }
     setSelCourse(useCid)
 
@@ -147,7 +148,7 @@ export default function InstructorPollsPage() {
   const filteredPolls = selCourse ? polls.filter((p) => p.courseId === selCourse) : polls
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="max-w-5xl px-4 py-6 mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl text-gray-900 font-display">Polls</h1>
@@ -377,7 +378,7 @@ export default function InstructorPollsPage() {
                   </div>
                   <p className="font-semibold text-gray-900 truncate">{poll.title}</p>
                   <p className="text-sm text-gray-500 mt-0.5 truncate">{poll.question}</p>
-                  <p className="mt-1 text-xs text-gray-400">{poll._count.responses} responses · {poll.type.replace('_', ' ')}</p>
+                  <p className="mt-1 text-xs text-gray-400">{poll._count?.responses ?? 0} {(poll._count?.responses ?? 0) === 1 ? 'response' : 'responses'} · {poll.type.replace('_', ' ')}</p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {poll.status === 'DRAFT' && (

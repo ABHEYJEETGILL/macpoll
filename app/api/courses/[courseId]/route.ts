@@ -12,7 +12,10 @@ export const GET = route<unknown, { courseId: string }>(
 
     const course = await prisma.course.findUnique({
       where: { id: params.courseId },
-      include: { _count: { select: { enrollments: true } } }
+      include: {
+        instructor: { select: { name: true, email: true } },
+        _count: { select: { enrollments: true } }
+      }
     });
     if (!course) throw Errors.notFound("Course");
 

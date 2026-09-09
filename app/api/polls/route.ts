@@ -28,6 +28,7 @@ export const GET = route({ roles: "any" }, async ({ req, user }) => {
     },
     include: {
       options: { orderBy: { orderIndex: "asc" } },
+      course: { select: { code: true, name: true } },
       _count: { select: { responses: true } }
     },
     orderBy: [{ sessionId: "asc" }, { orderIndex: "asc" }, { createdAt: "desc" }]
@@ -51,7 +52,8 @@ export const GET = route({ roles: "any" }, async ({ req, user }) => {
         : [],
       question: poll.showContentToStudents ? poll.question : null,
       imageUrl: poll.showContentToStudents ? poll.imageUrl : null,
-      _count: poll.hideResults && poll.status !== "ENDED" ? undefined : poll._count,
+      _count: poll.hideResults && poll.status !== "ENDED" ? { responses: 0 } : poll._count,
+      resultsHidden: poll.hideResults && poll.status !== "ENDED",
       myResponse: mine.get(poll.id) ?? null
     }))
   );

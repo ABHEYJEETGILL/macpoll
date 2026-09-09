@@ -32,13 +32,24 @@ export const PATCH = route<{ action: "start" | "end" }, { pollId: string }>(
       const updated = await prisma.poll.update({
         where: { id: poll.id },
         data: { status: "ACTIVE", startedAt: poll.startedAt ?? new Date() },
-        include: { options: { orderBy: { orderIndex: "asc" } } }
+        include: {
+          options: { orderBy: { orderIndex: "asc" } },
+          course: { select: { code: true, name: true } },
+          _count: { select: { responses: true } }
+        }
       });
 
-      // Emitted server-side. Clients cannot publish this event themselves.
+      // Emitted server-side; clients cannot publish this event themselves. The
+      // payload has to match what GET /api/polls returns to a student, since
+      // the page renders it directly into the same list.
       await publish(poll.courseId, "poll-started", {
         ...updated,
-        options: updated.options.map(({ isCorrect: _isCorrect, ...o }) => o)
+        options: updated.showContentToStudents
+          ? updated.options.map(({ isCorrect: _isCorrect, ...o }) => o)
+          : [],
+        question: updated.showContentToStudents ? updated.question : null,
+        imageUrl: updated.showContentToStudents ? updated.imageUrl : null,
+        myResponse: null
       });
       return NextResponse.json(updated);
     }

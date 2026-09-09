@@ -21,7 +21,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                   MacPoll
                 </span>
               </div>
-              <span className="text-xs text-slate-500">
+              <span className="hidden text-xs sm:inline text-slate-500">
                 McMaster University • Live Polling & Attendance
               </span>
             </div>

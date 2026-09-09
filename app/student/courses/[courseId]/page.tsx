@@ -13,7 +13,7 @@ interface Poll {
   showContentToStudents: boolean
   options: { id: string; text: string }[]
   myResponse?: { optionId?: string; shortAnswer?: string } | null
-  _count: { responses: number }
+  _count?: { responses: number }
 }
 
 interface AttendanceSession {
@@ -107,7 +107,7 @@ export default function StudentCoursePage() {
   const openSession = sessions.find((s) => s.isOpen)
 
   return (
-    <div className="max-w-3xl mx-auto space-y-8">
+    <div className="max-w-3xl px-4 py-6 mx-auto space-y-8">
       <div>
         <span className="text-xs font-semibold text-maroon-700 bg-maroon-50 px-2 py-0.5 rounded">{course.code}</span>
         <h1 className="mt-2 text-3xl text-gray-900 font-display">{course.name}</h1>
@@ -232,7 +232,7 @@ export default function StudentCoursePage() {
                       </p>
                     )}
                     <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-400">{poll._count.responses} responses</span>
+                      <span className="text-xs text-gray-400">{poll._count?.responses ?? 0} {(poll._count?.responses ?? 0) === 1 ? 'response' : 'responses'}</span>
                       <button onClick={() => submitPoll(poll.id, poll.type)} disabled={submitting[poll.id]} className="btn-primary">
                         {submitting[poll.id] ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
                         Submit
@@ -257,7 +257,7 @@ export default function StudentCoursePage() {
               <div key={poll.id} className="flex items-center justify-between p-4">
                 <div>
                   <p className="text-sm font-medium text-gray-900">{poll.title}</p>
-                  <p className="text-xs text-gray-400">{poll._count.responses} responses · Ended</p>
+                  <p className="text-xs text-gray-400">{poll._count?.responses ?? 0} {(poll._count?.responses ?? 0) === 1 ? 'response' : 'responses'} · Ended</p>
                 </div>
                 {poll.myResponse
                   ? <CheckCircle2 size={16} className="text-emerald-500 shrink-0" />
