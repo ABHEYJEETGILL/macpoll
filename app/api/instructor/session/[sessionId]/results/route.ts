@@ -1,49 +1,57 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth } from "@/lib/permissions";
+import { route } from "@/lib/api";
+import { requireOwnedSession } from "@/lib/permissions";
+import { tallyResponses, numericSummary, pollOptions } from "@/lib/answers";
 
-type RouteParams = {
-  params: { sessionId: string };
-};
+type Params = { sessionId: string };
 
-export async function GET(req: NextRequest, { params }: RouteParams) {
-  const user = await requireAuth(req);
-  if (!user || user.role !== "INSTRUCTOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+/**
+ * Live aggregates for every poll in the session. The previous version returned
+ * only the open poll, so past questions could not be revisited.
+ */
+export const GET = route<undefined, Params>(
+  { auth: "INSTRUCTOR" },
+  async ({ params, user }) => {
+    const session = await requireOwnedSession(user.id, params.sessionId);
+
+    const polls = await prisma.poll.findMany({
+      where: { liveSessionId: session.id },
+      orderBy: { createdAt: "desc" },
+      include: { responses: { select: { answerJson: true } } }
+    });
+
+    const attendance = await prisma.attendance.aggregate({
+      where: { liveSessionId: session.id },
+      _count: { _all: true }
+    });
+    const presentCount = await prisma.attendance.count({
+      where: { liveSessionId: session.id, presentBool: true }
+    });
+
+    const results = polls.map((poll) => {
+      const answers = poll.responses.map((response) => response.answerJson);
+      const { tallies, total } = tallyResponses(poll, answers);
+
+      return {
+        pollId: poll.id,
+        type: poll.type,
+        questionText: poll.questionText,
+        options: pollOptions(poll),
+        isOpen: Boolean(poll.openedAt) && !poll.closedAt,
+        openedAt: poll.openedAt,
+        closedAt: poll.closedAt,
+        timeLimitSec: poll.timeLimitSec,
+        tallies,
+        total,
+        numeric: poll.type === "NUMERIC" ? numericSummary(answers) : null
+      };
+    });
+
+    return NextResponse.json({
+      current: results.find((result) => result.isOpen) ?? null,
+      results,
+      attendance: { joined: attendance._count._all, present: presentCount }
+    });
   }
-
-  const session = await prisma.liveSession.findUnique({
-    where: { id: params.sessionId },
-    include: {
-      course: true,
-      polls: {
-        include: { responses: true },
-        orderBy: { openedAt: "desc" }
-      }
-    }
-  });
-
-  if (!session || session.course.ownerInstructorId !== user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const active = session.polls.find((p) => p.openedAt && !p.closedAt);
-  if (!active) {
-    return NextResponse.json({ current: null });
-  }
-
-  const counts: Record<string, number> = {};
-  for (const r of active.responses) {
-    const val = r.answerJson as any;
-    const key = typeof val === "string" ? val : JSON.stringify(val);
-    counts[key] = (counts[key] ?? 0) + 1;
-  }
-
-  return NextResponse.json({
-    current: {
-      pollId: active.id,
-      counts
-    }
-  });
-}
-
+);

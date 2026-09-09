@@ -1,96 +1,118 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { pollCreateSchema } from "@/lib/validation";
-import { rateLimit } from "@/lib/rateLimit";
-import { requireAuth } from "@/lib/permissions";
+import { route, Errors } from "@/lib/api";
+import { pollCreateSchema, pollUpdateSchema } from "@/lib/validation";
+import { requireOwnedSession } from "@/lib/permissions";
+import { publish } from "@/lib/realtime";
+import { TRUE_FALSE_OPTIONS } from "@/lib/answers";
+import type { z } from "zod";
 
-export async function POST(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user || user.role !== "INSTRUCTOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+type CreateBody = z.infer<typeof pollCreateSchema>;
+type UpdateBody = z.infer<typeof pollUpdateSchema>;
+
+export const POST = route<CreateBody>(
+  {
+    auth: "INSTRUCTOR",
+    body: pollCreateSchema,
+    rateLimit: { name: "create-poll", limit: 120, windowMs: 60_000 }
+  },
+  async ({ body, user }) => {
+    const session = await requireOwnedSession(user.id, body.liveSessionId);
+    if (session.endedAt) throw Errors.badRequest("This session has already ended.");
+
+    const options =
+      body.type === "MULTIPLE_CHOICE"
+        ? body.options
+        : body.type === "TRUE_FALSE"
+          ? [...TRUE_FALSE_OPTIONS]
+          : undefined;
+
+    // Launching a poll closes whatever was open, so students only ever see one
+    // question and results cannot be split across two live polls.
+    const poll = await prisma.$transaction(async (tx) => {
+      await tx.poll.updateMany({
+        where: { liveSessionId: session.id, openedAt: { not: null }, closedAt: null },
+        data: { closedAt: new Date() }
+      });
+
+      return tx.poll.create({
+        data: {
+          liveSessionId: session.id,
+          type: body.type,
+          questionText: body.questionText,
+          optionsJson: options,
+          isAnonymous: body.isAnonymous,
+          allowChange: body.allowChange,
+          timeLimitSec: body.timeLimitSec ?? null,
+          openedAt: new Date()
+        }
+      });
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        instructorId: user.id,
+        action: "OPEN_POLL",
+        metadata: { liveSessionId: session.id, pollId: poll.id }
+      }
+    });
+
+    await publish(session.sessionCode, { type: "poll-opened", pollId: poll.id });
+
+    return NextResponse.json({ poll }, { status: 201 });
   }
+);
 
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`create-poll:${ip}`, 240, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
-  }
+export const PATCH = route<UpdateBody>(
+  { auth: "INSTRUCTOR", body: pollUpdateSchema },
+  async ({ body, user }) => {
+    const poll = await prisma.poll.findUnique({
+      where: { id: body.pollId },
+      include: { liveSession: { include: { course: true } } }
+    });
 
-  const json = await req.json().catch(() => null);
-  const parsed = pollCreateSchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-
-  const { liveSessionId, type, questionText, options, isAnonymous, allowChange, timeLimitSec } =
-    parsed.data;
-
-  const session = await prisma.liveSession.findUnique({
-    where: { id: liveSessionId },
-    include: { course: true }
-  });
-  if (!session || session.endedAt || session.course.ownerInstructorId !== user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const poll = await prisma.poll.create({
-    data: {
-      liveSessionId,
-      type,
-      questionText,
-      optionsJson: options ? options : undefined,
-      isAnonymous,
-      allowChange,
-      timeLimitSec,
-      openedAt: new Date()
+    if (!poll) throw Errors.notFound("Poll");
+    if (poll.liveSession.course.ownerInstructorId !== user.id) {
+      throw Errors.forbidden("You do not teach this course.");
     }
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      instructorId: user.id,
-      action: "CREATE_POLL",
-      metadata: { liveSessionId, pollId: poll.id }
+    if (poll.liveSession.endedAt && !body.close) {
+      throw Errors.badRequest("Cannot reopen a poll in a session that has ended.");
     }
-  });
 
-  return NextResponse.json({ poll }, { status: 201 });
-}
+    const updated = await prisma.$transaction(async (tx) => {
+      // Reopening must close whatever else is open, or two polls would be live
+      // at once and students would see an arbitrary one of them.
+      if (!body.close) {
+        await tx.poll.updateMany({
+          where: {
+            liveSessionId: poll.liveSessionId,
+            id: { not: poll.id },
+            openedAt: { not: null },
+            closedAt: null
+          },
+          data: { closedAt: new Date() }
+        });
+      }
 
-export async function PATCH(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user || user.role !== "INSTRUCTOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      return tx.poll.update({
+        where: { id: poll.id },
+        data: { closedAt: body.close ? new Date() : null, openedAt: poll.openedAt ?? new Date() }
+      });
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        instructorId: user.id,
+        action: body.close ? "CLOSE_POLL" : "REOPEN_POLL",
+        metadata: { pollId: poll.id }
+      }
+    });
+
+    await publish(poll.liveSession.sessionCode, {
+      type: body.close ? "poll-closed" : "poll-opened",
+      pollId: poll.id
+    });
+
+    return NextResponse.json({ poll: updated });
   }
-
-  const { pollId, close } = await req.json().catch(() => ({ pollId: "", close: false }));
-  if (!pollId) {
-    return NextResponse.json({ error: "Missing pollId" }, { status: 400 });
-  }
-
-  const poll = await prisma.poll.findUnique({
-    where: { id: pollId },
-    include: { liveSession: { include: { course: true } } }
-  });
-  if (!poll || poll.liveSession.course.ownerInstructorId !== user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const updated = await prisma.poll.update({
-    where: { id: pollId },
-    data: {
-      closedAt: close ? new Date() : null
-    }
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      instructorId: user.id,
-      action: close ? "CLOSE_POLL" : "OPEN_POLL",
-      metadata: { pollId }
-    }
-  });
-
-  return NextResponse.json({ poll: updated }, { status: 200 });
-}
-
+);

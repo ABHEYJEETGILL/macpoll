@@ -1,81 +1,62 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { liveSessionCreateSchema } from "@/lib/validation";
-import { rateLimit } from "@/lib/rateLimit";
-import { requireAuth, requireInstructorForCourse } from "@/lib/permissions";
+import { route } from "@/lib/api";
+import { requireOwnedCourse } from "@/lib/permissions";
+import { generateUniqueCode } from "@/lib/codes";
 
-function generateSessionCode() {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
-}
+type Params = { courseId: string };
 
-type RouteParams = {
-  params: { courseId: string };
-};
+export const GET = route<undefined, Params>(
+  { auth: "INSTRUCTOR" },
+  async ({ params, user }) => {
+    await requireOwnedCourse(user.id, params.courseId);
 
-export async function GET(req: NextRequest, { params }: RouteParams) {
-  const user = await requireAuth(req);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const sessions = await prisma.liveSession.findMany({
+      where: { courseId: params.courseId },
+      orderBy: { startedAt: "desc" },
+      include: {
+        _count: { select: { polls: true, attendances: true } }
+      }
+    });
+
+    return NextResponse.json({ sessions });
   }
+);
 
-  const course = await prisma.course.findUnique({
-    where: { id: params.courseId }
-  });
-  if (!course || course.ownerInstructorId !== user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+export const POST = route<undefined, Params>(
+  {
+    auth: "INSTRUCTOR",
+    rateLimit: { name: "create-session", limit: 60, windowMs: 60_000 }
+  },
+  async ({ params, user }) => {
+    const course = await requireOwnedCourse(user.id, params.courseId);
+
+    // Only one session per course may be live at a time, so the join code a
+    // student is looking at is never ambiguous.
+    await prisma.liveSession.updateMany({
+      where: { courseId: course.id, endedAt: null },
+      data: { endedAt: new Date() }
+    });
+
+    const sessionCode = await generateUniqueCode(
+      async (code) => (await prisma.liveSession.count({ where: { sessionCode: code } })) > 0
+    );
+
+    const session = await prisma.liveSession.create({
+      data: { courseId: course.id, createdById: user.id, sessionCode }
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        instructorId: user.id,
+        action: "CREATE_SESSION",
+        metadata: { courseId: course.id, liveSessionId: session.id }
+      }
+    });
+
+    return NextResponse.json(
+      { session: { ...session, _count: { polls: 0, attendances: 0 } } },
+      { status: 201 }
+    );
   }
-
-  const sessions = await prisma.liveSession.findMany({
-    where: { courseId: params.courseId },
-    orderBy: { startedAt: "desc" }
-  });
-  return NextResponse.json({ sessions });
-}
-
-export async function POST(req: NextRequest, { params }: RouteParams) {
-  const user = await requireAuth(req);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const course = await requireInstructorForCourse(user.id, params.courseId);
-  if (!course) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`create-session:${ip}`, 60, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
-  }
-
-  // Basic shape validation (courseId already in params)
-  const json = await req.json().catch(() => null);
-  const parsed = liveSessionCreateSchema.pick({ courseId: true }).safeParse({
-    courseId: params.courseId,
-    ...(json || {})
-  });
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-
-  const sessionCode = generateSessionCode();
-  const session = await prisma.liveSession.create({
-    data: {
-      courseId: params.courseId,
-      createdById: user.id,
-      sessionCode
-    }
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      instructorId: user.id,
-      action: "CREATE_SESSION",
-      metadata: { courseId: course.id, liveSessionId: session.id }
-    }
-  });
-
-  return NextResponse.json({ session }, { status: 201 });
-}
-
+);

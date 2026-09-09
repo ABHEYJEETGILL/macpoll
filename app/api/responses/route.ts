@@ -1,67 +1,104 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { rateLimit } from "@/lib/rateLimit";
+import { route, Errors } from "@/lib/api";
 import { responseSubmitSchema } from "@/lib/validation";
-import { requireAuth } from "@/lib/permissions";
+import { isEnrolledInCourse } from "@/lib/permissions";
+import { normalizeAnswer } from "@/lib/answers";
+import { publish } from "@/lib/realtime";
+import type { z } from "zod";
 
-export async function POST(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+type Body = z.infer<typeof responseSubmitSchema>;
 
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`submit-response:${ip}`, 400, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
-  }
+export const POST = route<Body>(
+  {
+    body: responseSubmitSchema,
+    rateLimit: { name: "submit-response", limit: 120, windowMs: 60_000 }
+  },
+  async ({ body, user }) => {
+    const poll = await prisma.poll.findUnique({
+      where: { id: body.pollId },
+      include: { liveSession: { include: { course: true } } }
+    });
 
-  const json = await req.json().catch(() => null);
-  const parsed = responseSubmitSchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
+    if (!poll) throw Errors.notFound("Poll");
 
-  const { pollId, answer } = parsed.data;
+    const { liveSession } = poll;
 
-  const poll = await prisma.poll.findUnique({
-    where: { id: pollId },
-    include: { liveSession: true }
-  });
-  if (!poll || !poll.openedAt || poll.closedAt) {
-    return NextResponse.json({ error: "Poll not accepting responses" }, { status: 400 });
-  }
-
-  // Mark attendance as present (submitted at least one response)
-  await prisma.attendance.upsert({
-    where: {
-      liveSessionId_userId: {
-        liveSessionId: poll.liveSessionId,
-        userId: user.id
-      }
-    },
-    update: {
-      presentBool: true
-    },
-    create: {
-      liveSessionId: poll.liveSessionId,
-      userId: user.id,
-      presentBool: true
+    // The original code accepted a response from any signed-in user, letting
+    // anyone vote in any course's poll.
+    if (liveSession.course.ownerInstructorId === user.id) {
+      throw Errors.forbidden("Instructors cannot answer their own polls.");
     }
-  });
+    if (!(await isEnrolledInCourse(user.id, liveSession.courseId))) {
+      throw Errors.forbidden("You are not enrolled in this course.");
+    }
 
-  const data: any = {
-    pollId,
-    answerJson: answer
-  };
-  if (!poll.isAnonymous) {
-    data.userId = user.id;
+    if (liveSession.endedAt) throw Errors.badRequest("This session has ended.");
+    if (!poll.openedAt || poll.closedAt) {
+      throw Errors.badRequest("This poll is not accepting responses.");
+    }
+
+    if (poll.timeLimitSec) {
+      const closesAt = poll.openedAt.getTime() + poll.timeLimitSec * 1000;
+      if (Date.now() > closesAt) throw Errors.badRequest("Time is up for this poll.");
+    }
+
+    const answerJson = normalizeAnswer(poll, body.answer);
+
+    // Anonymous polls store no userId on the response, so the unique
+    // (pollId, userId) index on Response cannot dedupe them. PollParticipation
+    // records that this user answered this poll without recording their choice.
+    //
+    // Writing participation first lets its unique index arbitrate concurrent
+    // submissions; a read-then-write check would let two simultaneous requests
+    // from one student both slip through.
+    try {
+      await prisma.$transaction(async (tx) => {
+        if (poll.isAnonymous) {
+          await tx.pollParticipation.create({ data: { pollId: poll.id, userId: user.id } });
+          await tx.response.create({ data: { pollId: poll.id, answerJson } });
+          return;
+        }
+
+        const participation = await tx.pollParticipation.findUnique({
+          where: { pollId_userId: { pollId: poll.id, userId: user.id } }
+        });
+
+        if (participation && !poll.allowChange) {
+          throw Errors.conflict("You have already answered and this poll does not allow changes.");
+        }
+
+        if (!participation) {
+          await tx.pollParticipation.create({ data: { pollId: poll.id, userId: user.id } });
+        }
+
+        await tx.response.upsert({
+          where: { pollId_userId: { pollId: poll.id, userId: user.id } },
+          update: { answerJson },
+          create: { pollId: poll.id, userId: user.id, answerJson }
+        });
+      });
+    } catch (error) {
+      // P2002 is a unique-constraint violation: the student already answered.
+      if ((error as { code?: string }).code === "P2002") {
+        throw Errors.conflict("You have already answered this poll.");
+      }
+      throw error;
+    }
+
+    await prisma.attendance.upsert({
+      where: { liveSessionId_userId: { liveSessionId: liveSession.id, userId: user.id } },
+      update: { presentBool: true },
+      create: { liveSessionId: liveSession.id, userId: user.id, presentBool: true }
+    });
+
+    const total = await prisma.response.count({ where: { pollId: poll.id } });
+    await publish(liveSession.sessionCode, {
+      type: "response-submitted",
+      pollId: poll.id,
+      total
+    });
+
+    return NextResponse.json({ answer: answerJson, total }, { status: 201 });
   }
-
-  const response = await prisma.response.create({
-    data
-  });
-
-  return NextResponse.json({ response }, { status: 201 });
-}
-
+);
