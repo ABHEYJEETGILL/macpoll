@@ -2,32 +2,34 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   content: [
-    "./app/**/*.{js,ts,jsx,tsx,mdx}",
-    "./components/**/*.{js,ts,jsx,tsx,mdx}"
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}"
   ],
   theme: {
     extend: {
       colors: {
-        mcmaster: {
-          maroon: "#7A003C",
-          "maroon-dark": "#5C002D",
-          gold: "#FDBF57",
-          "gold-dark": "#E0A63C"
-        }
-      },
-      keyframes: {
-        "fade-in": {
-          from: { opacity: "0", transform: "translateY(4px)" },
-          to: { opacity: "1", transform: "translateY(0)" }
+        // McMaster brand maroon (#7A003C) as a full scale so it can carry
+        // borders, hovers and tints, not just the one flat brand colour.
+        maroon: {
+          50: "#FDF2F7",
+          100: "#FBE3EC",
+          200: "#F6C7D9",
+          300: "#EE9CBB",
+          400: "#E06694",
+          500: "#C93D72",
+          600: "#A82459",
+          700: "#7A003C",
+          800: "#660032",
+          900: "#520028",
+          950: "#330019"
         },
-        "bar-grow": {
-          from: { transform: "scaleX(0)" },
-          to: { transform: "scaleX(1)" }
-        }
+        "mcmaster-maroon": "#7A003C",
+        "mcmaster-gold": "#FDBF57",
+        "mcmaster-light": "#F5F0ED"
       },
-      animation: {
-        "fade-in": "fade-in 180ms ease-out",
-        "bar-grow": "bar-grow 320ms ease-out"
+      fontFamily: {
+        display: ['"Georgia"', '"Times New Roman"', "serif"]
       }
     }
   },

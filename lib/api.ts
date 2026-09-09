@@ -1,145 +1,128 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { User } from "@prisma/client";
-import { z } from "zod";
-import { prisma } from "./prisma";
-import { getSessionFromRequest, hasValidCsrf } from "./auth";
+import { ZodError, ZodSchema } from "zod";
+import { CSRF_HEADER, Role, SessionPayload, getSessionPayload, verifyCsrf } from "./auth";
 import { rateLimit } from "./rateLimit";
 
 export class ApiError extends Error {
   constructor(
     readonly status: number,
-    message: string,
-    readonly details?: unknown
+    message: string
   ) {
     super(message);
-    this.name = "ApiError";
   }
 }
 
 export const Errors = {
   unauthorized: () => new ApiError(401, "You must be signed in."),
-  forbidden: (message = "You do not have access to this resource.") => new ApiError(403, message),
+  forbidden: (msg = "You do not have access to this.") => new ApiError(403, msg),
   notFound: (what = "Resource") => new ApiError(404, `${what} not found.`),
-  badRequest: (message: string, details?: unknown) => new ApiError(400, message, details),
-  conflict: (message: string) => new ApiError(409, message),
-  tooMany: () => new ApiError(429, "Too many requests. Please slow down.")
+  badRequest: (msg: string) => new ApiError(400, msg),
+  conflict: (msg: string) => new ApiError(409, msg),
+  tooMany: (msg = "Too many requests. Please slow down.") => new ApiError(429, msg)
 };
 
-type Role = "INSTRUCTOR" | "STUDENT";
+const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-type RateLimitConfig = { limit: number; windowMs: number; name: string };
+type Ctx<TBody, TParams> = {
+  req: NextRequest;
+  params: TParams;
+  user: SessionPayload;
+  body: TBody;
+};
 
 type RouteConfig<TBody> = {
-  /** "none" skips the session check entirely. */
-  auth?: "none" | "any" | Role;
-  // Input side is deliberately loose: schemas using .default() or .transform()
-  // have an input type that differs from TBody, which is the parsed output.
-  body?: z.ZodType<TBody, z.ZodTypeDef, unknown>;
-  rateLimit?: RateLimitConfig;
-  /** Mutating routes require the double-submit CSRF header by default. */
+  /** Require a session. When roles are given, the session role must be one of them. */
+  roles?: Role[] | "any";
+  /** Defaults to true for mutating methods when a session is required. */
   csrf?: boolean;
-};
-
-export type RouteContext<TBody, TParams> = {
-  req: NextRequest;
-  body: TBody;
-  params: TParams;
-  user: User;
+  body?: ZodSchema<TBody>;
+  rateLimit?: { limit: number; windowMs: number; scope: string };
 };
 
 /**
- * The caller's IP. Behind a proxy this trusts X-Forwarded-For, which is only
- * meaningful when the app sits behind one that overwrites the header.
+ * Wraps a route handler so that session lookup, role checks, CSRF verification,
+ * rate limiting and body validation all happen in one place. Endpoints cannot
+ * silently omit one of them.
  */
-function clientIp(req: NextRequest): string {
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0]!.trim();
-  return req.headers.get("x-real-ip") ?? "unknown";
-}
-
-function errorResponse(error: unknown): NextResponse {
-  if (error instanceof ApiError) {
-    return NextResponse.json(
-      { error: error.message, details: error.details ?? undefined },
-      { status: error.status }
-    );
-  }
-
-  console.error("Unhandled API error:", error);
-  return NextResponse.json({ error: "Something went wrong on our end." }, { status: 500 });
-}
-
-/**
- * Wraps a route handler with session lookup, role checks, CSRF enforcement,
- * rate limiting and body validation so no individual route can forget one.
- */
-export function route<TBody = undefined, TParams = Record<string, string>>(
+export function route<TBody = unknown, TParams = Record<string, string>>(
   config: RouteConfig<TBody>,
-  handler: (ctx: RouteContext<TBody, TParams>) => Promise<NextResponse> | NextResponse
+  handler: (ctx: Ctx<TBody, TParams>) => Promise<Response> | Response
 ) {
-  return async (req: NextRequest, routeArgs?: { params: TParams }): Promise<NextResponse> => {
+  return async (req: NextRequest, routeCtx?: { params: TParams }): Promise<Response> => {
     try {
-      const authMode = config.auth ?? "any";
-      const isMutation = req.method !== "GET" && req.method !== "HEAD";
+      const needsAuth = config.roles !== undefined;
+      let user = null as SessionPayload | null;
 
-      let user: User | null = null;
-      if (authMode !== "none") {
-        const session = getSessionFromRequest(req);
-        if (!session) throw Errors.unauthorized();
-
-        user = await prisma.user.findUnique({ where: { id: session.userId } });
+      if (needsAuth) {
+        user = getSessionPayload();
         if (!user) throw Errors.unauthorized();
-
-        // A role change since the token was issued invalidates it.
-        if (user.role !== session.role) throw Errors.unauthorized();
-        if (authMode !== "any" && user.role !== authMode) {
-          throw Errors.forbidden(`This action requires ${authMode.toLowerCase()} access.`);
+        if (config.roles !== "any" && !config.roles!.includes(user.role)) {
+          throw Errors.forbidden();
         }
       }
 
-      const csrfRequired = config.csrf ?? (isMutation && authMode !== "none");
-      if (csrfRequired && !hasValidCsrf(req)) {
-        throw new ApiError(403, "Invalid or missing CSRF token. Try reloading the page.");
+      const csrfRequired = config.csrf ?? (needsAuth && MUTATING.has(req.method));
+      if (csrfRequired && !verifyCsrf(req.headers.get(CSRF_HEADER))) {
+        throw Errors.forbidden("Invalid or missing CSRF token.");
       }
 
       if (config.rateLimit) {
-        const identity = user ? `user:${user.id}` : `ip:${clientIp(req)}`;
-        const { ok } = rateLimit(
-          `${config.rateLimit.name}:${identity}`,
-          config.rateLimit.limit,
-          config.rateLimit.windowMs
-        );
-        if (!ok) throw Errors.tooMany();
+        // Keyed per account when signed in, else per client address. A lecture
+        // hall shares one NAT address, so per-IP keying would lock out a class.
+        const identity = user?.id ?? clientAddress(req);
+        const { limit, windowMs, scope } = config.rateLimit;
+        if (!rateLimit(`${scope}:${identity}`, limit, windowMs).ok) {
+          throw Errors.tooMany();
+        }
       }
 
       let body = undefined as TBody;
       if (config.body) {
-        const raw = await req.json().catch(() => undefined);
-        const parsed = config.body.safeParse(raw);
-        if (!parsed.success) {
-          throw Errors.badRequest(
-            firstIssueMessage(parsed.error) ?? "Please check the values you submitted.",
-            parsed.error.flatten()
-          );
-        }
-        body = parsed.data;
+        const raw = await req.json().catch(() => {
+          throw Errors.badRequest("Request body must be valid JSON.");
+        });
+        body = config.body.parse(raw);
       }
 
       return await handler({
         req,
-        body,
-        params: (routeArgs?.params ?? ({} as TParams)) as TParams,
-        user: user as User
+        params: (routeCtx?.params ?? {}) as TParams,
+        user: user as SessionPayload,
+        body
       });
     } catch (error) {
-      return errorResponse(error);
+      return toResponse(error);
     }
   };
 }
 
-function firstIssueMessage(error: z.ZodError): string | null {
-  const issue = error.issues[0];
-  if (!issue) return null;
-  const path = issue.path.join(".");
-  return path ? `${path}: ${issue.message}` : issue.message;
+export function clientAddress(req: NextRequest): string {
+  return (
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
+  );
+}
+
+function toResponse(error: unknown): Response {
+  if (error instanceof ApiError) {
+    return NextResponse.json({ error: error.message }, { status: error.status });
+  }
+  if (error instanceof ZodError) {
+    return NextResponse.json(
+      { error: error.errors[0]?.message ?? "Invalid request." },
+      { status: 400 }
+    );
+  }
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code: string }).code;
+    if (code === "P2002") {
+      return NextResponse.json({ error: "That already exists." }, { status: 409 });
+    }
+    if (code === "P2025") {
+      return NextResponse.json({ error: "Resource not found." }, { status: 404 });
+    }
+  }
+  console.error("Unhandled API error:", error);
+  return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
 }

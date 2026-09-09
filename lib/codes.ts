@@ -1,34 +1,37 @@
-import crypto from "crypto";
+import { randomBytes } from "crypto";
 
-// Crockford-style alphabet: no O/0, I/1, S/5 so codes read cleanly off a
-// lecture hall projector and are hard to mistype.
-const ALPHABET = "ABCDEFGHJKLMNPQRTUVWXY2346789";
-const CODE_LENGTH = 6;
+// Excludes I, O, 0, 1 so codes read aloud in a lecture hall are unambiguous.
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-export function generateCode(length = CODE_LENGTH): string {
-  const bytes = crypto.randomBytes(length);
-  let code = "";
-  for (let i = 0; i < length; i += 1) {
-    code += ALPHABET[bytes[i]! % ALPHABET.length];
+/** Cryptographically random code over an unambiguous alphabet. */
+export function generateCode(length = 6): string {
+  // Rejection-sample so every letter is equally likely (256 % 32 === 0 here,
+  // so a plain modulo is already uniform, but keep it explicit).
+  const max = Math.floor(256 / ALPHABET.length) * ALPHABET.length;
+  let out = "";
+  while (out.length < length) {
+    for (const byte of randomBytes(length * 2)) {
+      if (byte >= max) continue;
+      out += ALPHABET[byte % ALPHABET.length];
+      if (out.length === length) break;
+    }
   }
-  return code;
+  return out;
 }
 
 /**
- * Generates a code that passes `isTaken`, retrying on collision. The unique
- * index stays the real guarantee; this just avoids surfacing a 500 to the user.
+ * Generates a code that is not already taken, retrying on collision. Returns
+ * null if the space is too crowded to find one, so callers surface a real error
+ * rather than writing a duplicate.
  */
 export async function generateUniqueCode(
-  isTaken: (code: string) => Promise<boolean>,
+  exists: (code: string) => Promise<boolean>,
+  length = 6,
   attempts = 10
-): Promise<string> {
-  for (let i = 0; i < attempts; i += 1) {
-    const code = generateCode();
-    if (!(await isTaken(code))) return code;
+): Promise<string | null> {
+  for (let i = 0; i < attempts; i++) {
+    const code = generateCode(length);
+    if (!(await exists(code))) return code;
   }
-  throw new Error("Could not generate an unused code after multiple attempts");
-}
-
-export function normalizeCode(input: string): string {
-  return input.trim().toUpperCase().replace(/\s+/g, "");
+  return null;
 }

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { clearSessionCookie } from "@/lib/auth";
+import { clearSessionCookies } from "@/lib/auth";
 import { route } from "@/lib/api";
 
-export const POST = route({ auth: "none", csrf: false }, async () => {
-  clearSessionCookie();
+export const POST = route({ roles: "any" }, async () => {
+  clearSessionCookies();
   return NextResponse.json({ success: true });
 });

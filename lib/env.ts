@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const secret = z
   .string()
-  .min(32, "must be at least 32 characters — generate one with `openssl rand -hex 32`");
+  .min(32, "must be at least 32 characters - generate one with `openssl rand -hex 32`");
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -18,10 +18,8 @@ export type Env = z.infer<typeof schema>;
 
 let cached: Env | null = null;
 
-/**
- * Validates process.env on first use and fails loudly. Called lazily rather
- * than at module load so that `next build` can collect pages without secrets.
- */
+// Validated lazily rather than at import time so `next build` can collect
+// pages without production secrets being present.
 export function env(): Env {
   if (cached) return cached;
 

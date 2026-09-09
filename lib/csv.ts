@@ -1,22 +1,16 @@
-const NEEDS_QUOTING = /[",\r\n]/;
-// Excel and Sheets execute a cell that opens with one of these.
-const FORMULA_PREFIX = /^[=+\-@\t\r]/;
+// A cell starting with one of these is interpreted as a formula by Excel and
+// Sheets. Student-supplied text (names, short answers) reaches the export, so
+// prefix such cells with a quote to neutralise them.
+const FORMULA_PREFIXES = ["=", "+", "-", "@", "\t", "\r"];
 
-export function csvCell(value: unknown): string {
-  if (value === null || value === undefined) return "";
-
-  let text = String(value);
-  if (FORMULA_PREFIX.test(text)) text = `'${text}`;
-  if (NEEDS_QUOTING.test(text)) text = `"${text.replace(/"/g, '""')}"`;
-
-  return text;
+function escapeCell(value: unknown): string {
+  const raw = value === null || value === undefined ? "" : String(value);
+  const guarded = FORMULA_PREFIXES.some((p) => raw.startsWith(p)) ? `'${raw}` : raw;
+  return `"${guarded.replace(/"/g, '""')}"`;
 }
 
-export function csvRow(cells: unknown[]): string {
-  return cells.map(csvCell).join(",");
-}
-
-/** Joins rows with CRLF and prepends a BOM so Excel reads UTF-8 correctly. */
-export function csvDocument(rows: unknown[][]): string {
-  return `﻿${rows.map(csvRow).join("\r\n")}\r\n`;
+export function toCsv(headers: string[], rows: unknown[][]): string {
+  const lines = [headers.map(escapeCell).join(",")];
+  for (const row of rows) lines.push(row.map(escapeCell).join(","));
+  return lines.join("\r\n");
 }

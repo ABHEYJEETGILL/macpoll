@@ -1,47 +1,41 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { verifyPassword, setSessionCookie, hashPassword } from "@/lib/auth";
-import { route, ApiError, Errors } from "@/lib/api";
-import { loginSchema } from "@/lib/validation";
+import { clearSessionCookies, setSessionCookie, verifyPassword } from "@/lib/auth";
+import { ApiError, Errors, route } from "@/lib/api";
 import { rateLimit } from "@/lib/rateLimit";
+import { loginSchema } from "@/lib/validation";
 
-// Comparing against a throwaway hash keeps the response time for an unknown
-// email close to that of a known one, so the endpoint does not leak which
-// addresses are registered.
-const DUMMY_HASH_PROMISE = hashPassword("macpoll-timing-equalizer");
+export const POST = route({ body: loginSchema }, async ({ body }) => {
+  const { email, password } = body;
 
-export const POST = route(
-  {
-    auth: "none",
-    csrf: false,
-    body: loginSchema,
-    // A whole lecture hall shares one campus NAT address, so the per-IP cap is
-    // loose and the meaningful brute-force limit is per account, below.
-    rateLimit: { name: "login-ip", limit: 200, windowMs: 60_000 }
-  },
-  async ({ body }) => {
-    const { email, password } = body;
-
-    if (!rateLimit(`login-account:${email}`, 10, 60_000).ok) {
-      throw Errors.tooMany();
-    }
-
-    const user = await prisma.user.findUnique({ where: { email } });
-
-    if (!user?.passwordHash) {
-      await verifyPassword(await DUMMY_HASH_PROMISE, password);
-      throw new ApiError(401, "Incorrect email or password.");
-    }
-
-    if (!(await verifyPassword(user.passwordHash, password))) {
-      throw new ApiError(401, "Incorrect email or password.");
-    }
-
-    const { csrfToken } = setSessionCookie({ userId: user.id, role: user.role, email: user.email });
-
-    return NextResponse.json({
-      user: { id: user.id, email: user.email, role: user.role, verifiedAt: user.verifiedAt },
-      csrfToken
-    });
+  // Keyed per account, not per IP: a lecture hall shares one campus NAT
+  // address and per-IP throttling would lock out the whole class.
+  if (!rateLimit(`login:${email}`, 10, 60_000).ok) {
+    throw Errors.tooMany("Too many sign-in attempts. Try again in a minute.");
   }
-);
+
+  const invalid = new ApiError(401, "Invalid email or password.");
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) throw invalid;
+  if (!(await verifyPassword(user.password, password))) throw invalid;
+  if (user.suspended) throw Errors.forbidden("This account has been suspended.");
+
+  clearSessionCookies();
+  const { csrfToken } = setSessionCookie({
+    id: user.id,
+    role: user.role,
+    email: user.email
+  });
+
+  return NextResponse.json({
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      emailVerified: user.emailVerified
+    },
+    csrfToken
+  });
+});

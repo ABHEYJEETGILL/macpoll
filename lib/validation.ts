@@ -1,91 +1,127 @@
 import { z } from "zod";
 
-export const MCMASTER_DOMAIN = "@mcmaster.ca";
-
-export const emailSchema = z
+const mcmasterEmail = z
   .string()
-  .trim()
-  .toLowerCase()
-  .email("Enter a valid email address.")
-  .refine((email) => email.endsWith(MCMASTER_DOMAIN), {
-    message: `Only ${MCMASTER_DOMAIN} email addresses can register.`
+  .email("Must be a valid email")
+  .transform((v) => v.toLowerCase())
+  .refine((v) => v.endsWith("@mcmaster.ca"), {
+    message: "Must be a @mcmaster.ca email address"
   });
 
-export const passwordSchema = z
-  .string()
-  .min(8, "Password must be at least 8 characters.")
-  .max(128, "Password must be at most 128 characters.");
-
-const codeSchema = z
-  .string()
-  .trim()
-  .toUpperCase()
-  .min(4, "Code is too short.")
-  .max(12, "Code is too long.");
+// Auth
 
 export const registerSchema = z.object({
-  email: emailSchema,
-  password: passwordSchema,
+  name: z.string().min(1, "Name is required").max(120),
+  email: mcmasterEmail,
+  password: z.string().min(8, "Password must be at least 8 characters").max(200),
   role: z.enum(["INSTRUCTOR", "STUDENT"])
 });
 
 export const loginSchema = z.object({
-  email: emailSchema,
-  password: z.string().min(1, "Enter your password.")
+  email: mcmasterEmail,
+  password: z.string().min(1, "Password is required")
 });
 
-export const verifyEmailSchema = z.object({
-  email: emailSchema,
-  code: z.string().trim().toUpperCase().min(4).max(12)
-});
+// Courses
 
 export const courseCreateSchema = z.object({
-  name: z.string().trim().min(2, "Course name is too short.").max(120),
-  term: z.string().trim().min(2, "Term is too short.").max(50)
+  name: z.string().min(1, "Course name is required").max(120),
+  code: z.string().min(1, "Course code is required").max(32),
+  description: z.string().max(500).optional(),
+  semester: z.string().max(60).optional()
 });
 
-export const joinCourseSchema = z.object({ joinCode: codeSchema });
+export const joinCourseSchema = z.object({
+  joinCode: z
+    .string()
+    .min(1, "Join code is required")
+    .max(16)
+    .transform((v) => v.toUpperCase())
+});
 
-export const joinSessionSchema = z.object({ sessionCode: codeSchema });
+// Class sessions
 
-export const pollCreateSchema = z
+export const classSessionCreateSchema = z.object({
+  courseId: z.string().cuid("Invalid course ID"),
+  title: z.string().min(2, "Title is required").max(120),
+  description: z.string().max(500).optional(),
+  date: z.string().datetime().optional()
+});
+
+export const classSessionActionSchema = z.object({
+  action: z.enum(["activate", "deactivate"])
+});
+
+// Questions (reusable library)
+
+export const questionCreateSchema = z.object({
+  title: z.string().min(2).max(120),
+  body: z.string().min(3).max(1000),
+  type: z.enum(["MULTIPLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER"]),
+  imageUrl: z.string().url().optional().nullable(),
+  showContentToStudents: z.boolean().default(true),
+  points: z.number().int().min(0).max(100).default(1),
+  options: z
+    .array(
+      z.object({
+        text: z.string().min(1).max(200),
+        isCorrect: z.boolean().default(false)
+      })
+    )
+    .min(2)
+    .max(6)
+    .optional()
+});
+
+// Polls
+
+export const pollCreateSchema = z.object({
+  courseId: z.string().cuid("Invalid course ID"),
+  sessionId: z.string().cuid().optional().nullable(),
+  questionId: z.string().cuid().optional().nullable(),
+  title: z.string().min(1, "Title is required").max(120),
+  question: z.string().min(1, "Question is required").max(1000),
+  type: z.enum(["MULTIPLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER"]),
+  imageUrl: z.string().url().optional().nullable(),
+  showContentToStudents: z.boolean().default(true),
+  hideResults: z.boolean().default(false),
+  timerSeconds: z.number().int().positive().max(3600).optional().nullable(),
+  options: z
+    .array(
+      z.object({
+        text: z.string().min(1).max(200),
+        isCorrect: z.boolean().default(false)
+      })
+    )
+    .min(2)
+    .max(8)
+    .optional()
+});
+
+export const pollActionSchema = z.object({
+  pollId: z.string().cuid("Invalid poll ID"),
+  action: z.enum(["start", "end"])
+});
+
+// Responses
+
+export const submitPollResponseSchema = z
   .object({
-    liveSessionId: z.string().cuid(),
-    type: z.enum(["MULTIPLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER", "NUMERIC"]),
-    questionText: z.string().trim().min(3, "Question is too short.").max(500),
-    options: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
-    isAnonymous: z.boolean().default(false),
-    allowChange: z.boolean().default(true),
-    timeLimitSec: z.number().int().min(5).max(3600).nullish()
+    pollId: z.string().cuid("Invalid poll ID"),
+    optionId: z.string().cuid().optional(),
+    shortAnswer: z.string().min(1).max(1000).optional()
   })
-  .superRefine((value, ctx) => {
-    if (value.type !== "MULTIPLE_CHOICE") return;
-
-    const options = value.options ?? [];
-    if (options.length < 2) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["options"],
-        message: "Multiple choice polls need at least 2 options."
-      });
-      return;
-    }
-    if (new Set(options).size !== options.length) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["options"],
-        message: "Options must be unique."
-      });
-    }
+  .refine((v) => Boolean(v.optionId) || Boolean(v.shortAnswer), {
+    message: "An answer is required."
   });
 
-export const pollUpdateSchema = z.object({
-  pollId: z.string().cuid(),
-  close: z.boolean()
-});
+/** @deprecated use `submitPollResponseSchema` */
+export const SubmitPollResponseSchema = submitPollResponseSchema;
 
-export const responseSubmitSchema = z.object({
-  pollId: z.string().cuid(),
-  // Shape is checked here; meaning is checked against the poll in normalizeAnswer.
-  answer: z.union([z.string().max(240), z.number(), z.boolean()])
+// Attendance
+
+export const attendanceOpenSchema = z.object({
+  courseId: z.string().cuid("Invalid course ID"),
+  label: z.string().min(1, "Label is required").max(120),
+  durationMins: z.number().int().positive().max(600).optional()
 });

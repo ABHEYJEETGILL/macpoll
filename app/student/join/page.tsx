@@ -1,75 +1,51 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { Alert } from "@/components/ui/Feedback";
-import { apiFetch, errorMessage } from "@/lib/client/api";
+import { ApiRequestError, apiFetch } from "@/lib/client/api";
 
-type JoinResponse = {
-  session: { id: string; sessionCode: string; courseName: string };
-  isInstructor: boolean;
-};
-
-export default function StudentJoinPage() {
+export default function JoinCoursePage() {
   const router = useRouter();
-  const [sessionCode, setSessionCode] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
 
-  async function handleJoin(event: FormEvent) {
-    event.preventDefault();
-    setLoading(true);
+  async function handleJoin(e: React.FormEvent) {
+    e.preventDefault();
     setError(null);
-
+    setBusy(true);
     try {
-      const data = await apiFetch<JoinResponse>("/api/sessions/join", {
+      const course = await apiFetch<{ id: string }>("/api/courses/join", {
         method: "POST",
-        body: JSON.stringify({ sessionCode })
+        body: JSON.stringify({ joinCode })
       });
-
-      router.push(
-        data.isInstructor
-          ? `/instructor/session/${data.session.id}`
-          : `/student/session/${data.session.id}`
-      );
+      router.push(`/student/courses/${course.id}`);
     } catch (err) {
-      setError(errorMessage(err));
-      setLoading(false);
+      setError(err instanceof ApiRequestError ? err.message : "Could not join that course.");
+      setBusy(false);
     }
   }
 
   return (
-    <div className="mx-auto max-w-md px-4 py-12">
-      <h1 className="mb-2 text-2xl font-semibold text-mcmaster-maroon">Join a live session</h1>
-      <p className="mb-6 text-sm text-slate-600">
-        Enter the session code shown on your instructor&apos;s screen. You will be enrolled in the
-        course automatically.
+    <div className="max-w-md px-4 py-12 mx-auto">
+      <h1 className="text-2xl font-semibold text-mcmaster-maroon">Join a course</h1>
+      <p className="mt-1 text-sm text-slate-600">
+        Enter the join code your instructor shared.
       </p>
 
-      <form onSubmit={handleJoin} className="space-y-4">
+      <form onSubmit={handleJoin} className="mt-6 space-y-4">
         <Input
-          label="Session code"
-          value={sessionCode}
-          onChange={(event) => setSessionCode(event.target.value.toUpperCase())}
-          required
-          autoFocus
-          autoCapitalize="characters"
-          autoComplete="off"
-          maxLength={12}
+          label="Join code"
+          value={joinCode}
+          onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
           placeholder="ABC123"
-          className="text-center text-2xl font-mono tracking-[0.4em]"
+          autoFocus
         />
-        {error && <Alert tone="error">{error}</Alert>}
-        <Button
-          type="submit"
-          size="lg"
-          className="w-full"
-          loading={loading}
-          disabled={sessionCode.trim().length < 4}
-        >
-          Join session
+        {error && <p className="text-sm text-red-600">{error}</p>}
+        <Button type="submit" className="w-full" disabled={busy || !joinCode}>
+          {busy ? "Joining..." : "Join course"}
         </Button>
       </form>
     </div>

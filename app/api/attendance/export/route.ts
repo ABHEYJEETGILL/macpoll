@@ -1,125 +1,52 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { route, Errors } from "@/lib/api";
-import { requireOwnedSession } from "@/lib/permissions";
-import { csvDocument } from "@/lib/csv";
-import { tallyResponses } from "@/lib/answers";
+import { Errors, route } from "@/lib/api";
+import { toCsv } from "@/lib/csv";
 
-export const GET = route({ auth: "INSTRUCTOR" }, async ({ req, user }) => {
-  const liveSessionId = new URL(req.url).searchParams.get("liveSessionId");
-  if (!liveSessionId) throw Errors.badRequest("Missing liveSessionId.");
+export const GET = route({ roles: ["INSTRUCTOR", "ADMIN"] }, async ({ req, user }) => {
+  const sessionId = req.nextUrl.searchParams.get("sessionId");
+  if (!sessionId) throw Errors.badRequest("sessionId is required.");
 
-  const session = await requireOwnedSession(user.id, liveSessionId);
-
-  const [enrollments, attendances, polls, participation] = await Promise.all([
-    prisma.enrollment.findMany({
-      where: { courseId: session.courseId },
-      include: { user: { select: { id: true, email: true } } }
-    }),
-    prisma.attendance.findMany({ where: { liveSessionId: session.id } }),
-    prisma.poll.findMany({
-      where: { liveSessionId: session.id },
-      orderBy: { createdAt: "asc" },
-      include: { responses: { select: { answerJson: true, userId: true } } }
-    }),
-    prisma.pollParticipation.groupBy({
-      by: ["userId"],
-      where: { poll: { liveSessionId: liveSessionId } },
-      _count: { _all: true }
-    })
-  ]);
-
-  const attendanceByUser = new Map(attendances.map((a) => [a.userId, a]));
-  // Answered counts come from participation so anonymous polls, which store no
-  // userId on the response, are still reflected.
-  const answeredByUser = new Map(participation.map((row) => [row.userId, row._count._all]));
-  const rows: unknown[][] = [];
-
-  rows.push(["MacPoll session export"]);
-  rows.push(["Course", `${session.course.name} (${session.course.term})`]);
-  rows.push(["Session code", session.sessionCode]);
-  rows.push(["Started", session.startedAt.toISOString()]);
-  rows.push(["Ended", session.endedAt ? session.endedAt.toISOString() : "still live"]);
-  rows.push([]);
-
-  // One column per poll so a row reads as a single student's whole lecture.
-  rows.push(["Attendance"]);
-  rows.push([
-    "Email",
-    "Present",
-    "Joined",
-    "First join",
-    "Answered",
-    ...polls.map((poll, index) => `Q${index + 1}: ${poll.questionText}`)
-  ]);
-
-  const answerLookup = new Map<string, string>();
-  for (const poll of polls) {
-    for (const response of poll.responses) {
-      if (!response.userId) continue;
-      answerLookup.set(`${poll.id}:${response.userId}`, String(response.answerJson));
-    }
-  }
-
-  const sorted = [...enrollments].sort((a, b) => a.user.email.localeCompare(b.user.email));
-  for (const { user: student } of sorted) {
-    const attendance = attendanceByUser.get(student.id);
-    const answers = polls.map((poll) => answerLookup.get(`${poll.id}:${student.id}`) ?? "");
-
-    rows.push([
-      student.email,
-      attendance?.presentBool ? "YES" : "NO",
-      attendance ? "YES" : "NO",
-      attendance ? attendance.firstJoinAt.toISOString() : "",
-      answeredByUser.get(student.id) ?? 0,
-      ...answers
-    ]);
-  }
-
-  rows.push([]);
-  rows.push(["Poll results"]);
-  rows.push(["#", "Question", "Type", "Anonymous", "Option", "Count", "Percent", "Responses"]);
-
-  polls.forEach((poll, index) => {
-    const { tallies, total } = tallyResponses(
-      poll,
-      poll.responses.map((response) => response.answerJson)
-    );
-
-    if (tallies.length === 0) {
-      rows.push([index + 1, poll.questionText, poll.type, poll.isAnonymous ? "YES" : "NO", "", 0, "0%", 0]);
-      return;
-    }
-
-    for (const tally of tallies) {
-      rows.push([
-        index + 1,
-        poll.questionText,
-        poll.type,
-        poll.isAnonymous ? "YES" : "NO",
-        tally.label,
-        tally.count,
-        `${tally.percent}%`,
-        total
-      ]);
+  const session = await prisma.attendanceSession.findUnique({
+    where: { id: sessionId },
+    include: {
+      course: { select: { name: true, code: true, instructorId: true } },
+      records: {
+        include: { student: { select: { name: true, email: true } } },
+        orderBy: { markedAt: "asc" }
+      }
     }
   });
-
-  // Anonymous polls are excluded from the per-student columns above; note it.
-  if (polls.some((poll) => poll.isAnonymous)) {
-    rows.push([]);
-    rows.push(["Note", "Anonymous polls are reported in aggregate only."]);
+  if (!session) throw Errors.notFound("Attendance session");
+  if (session.course.instructorId !== user.id && user.role !== "ADMIN") {
+    throw Errors.forbidden("You do not own this course.");
   }
 
-  const filename = `macpoll-${session.sessionCode}-${session.startedAt.toISOString().slice(0, 10)}.csv`;
+  const enrolled = await prisma.enrollment.findMany({
+    where: { courseId: session.courseId },
+    include: { student: { select: { id: true, name: true, email: true } } }
+  });
+  const markedAt = new Map(session.records.map((r) => [r.studentId, r.markedAt]));
 
-  return new NextResponse(csvDocument(rows), {
+  const csv = toCsv(
+    ["Name", "Email", "Present", "Marked At"],
+    enrolled.map((e) => [
+      e.student.name,
+      e.student.email,
+      markedAt.has(e.student.id) ? "YES" : "NO",
+      markedAt.get(e.student.id)?.toISOString() ?? ""
+    ])
+  );
+
+  const filename = `attendance-${session.course.code}-${session.id}.csv`.replace(
+    /[^A-Za-z0-9._-]/g,
+    "_"
+  );
+
+  return new NextResponse(csv, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${filename}"`,
-      "Cache-Control": "no-store"
+      "Content-Disposition": `attachment; filename="${filename}"`
     }
   });
 });
-
-export const dynamic = "force-dynamic";

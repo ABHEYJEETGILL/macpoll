@@ -1,42 +1,28 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { route, Errors } from "@/lib/api";
+import { Errors, route } from "@/lib/api";
 import { rateLimit } from "@/lib/rateLimit";
-import { verifyEmailSchema } from "@/lib/validation";
 
-export const POST = route(
-  {
-    auth: "none",
-    csrf: false,
-    body: verifyEmailSchema,
-    rateLimit: { name: "verify-email-ip", limit: 200, windowMs: 60_000 }
-  },
-  async ({ body }) => {
-    const { email, code } = body;
+const schema = z.object({ code: z.string().min(1).max(16) });
 
-    // The code is short, so guessing is limited per address rather than per IP
-    // (a campus NAT would otherwise share one budget across the whole class).
-    if (!rateLimit(`verify-email-account:${email}`, 10, 60_000).ok) {
-      throw Errors.tooMany();
-    }
-
-    const token = await prisma.verificationToken.findUnique({
-      where: { email_token: { email, token: code } }
-    });
-
-    if (!token || token.expiresAt < new Date()) {
-      throw Errors.badRequest("That code is invalid or has expired.");
-    }
-
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) throw Errors.notFound("Account");
-
-    await prisma.$transaction([
-      prisma.user.update({ where: { email }, data: { verifiedAt: new Date() } }),
-      // Drop every outstanding code for this address, not just the one used.
-      prisma.verificationToken.deleteMany({ where: { email } })
-    ]);
-
-    return NextResponse.json({ success: true });
+export const POST = route({ roles: "any", body: schema }, async ({ user, body }) => {
+  if (!rateLimit(`verify:${user.id}`, 10, 60_000).ok) {
+    throw Errors.tooMany("Too many attempts. Try again in a minute.");
   }
-);
+
+  const found = await prisma.user.findUnique({ where: { id: user.id } });
+  if (!found) throw Errors.notFound("Account");
+  if (found.emailVerified) return NextResponse.json({ success: true });
+
+  if (!found.verificationToken || found.verificationToken !== body.code.toUpperCase()) {
+    throw Errors.badRequest("Invalid verification code.");
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { emailVerified: true, verificationToken: null }
+  });
+
+  return NextResponse.json({ success: true });
+});

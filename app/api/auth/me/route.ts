@@ -1,22 +1,18 @@
 import { NextResponse } from "next/server";
-import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getSessionFromRequest, readCookie, CSRF_COOKIE } from "@/lib/auth";
+import { getSessionPayload } from "@/lib/auth";
 
-/**
- * Returns the signed-in user, or null. Deliberately not wrapped in `route`:
- * an absent session is a normal answer here, not a 401, so the client can
- * bootstrap without treating logged-out as an error.
- */
-export async function GET(req: NextRequest) {
-  const session = getSessionFromRequest(req);
+export const dynamic = "force-dynamic";
+
+// Deliberately public and never 401: the client calls this to ask "am I signed
+// in?", so "no" is a normal answer, not an error.
+export async function GET() {
+  const session = getSessionPayload();
   if (!session) return NextResponse.json({ user: null });
 
-  const user = await prisma.user.findUnique({ where: { id: session.userId } });
-  if (!user) return NextResponse.json({ user: null });
-
-  return NextResponse.json({
-    user: { id: user.id, email: user.email, role: user.role, verifiedAt: user.verifiedAt },
-    csrfToken: readCookie(req.headers.get("cookie") ?? "", CSRF_COOKIE)
+  const user = await prisma.user.findUnique({
+    where: { id: session.id },
+    select: { id: true, name: true, email: true, role: true, emailVerified: true }
   });
+  return NextResponse.json({ user: user ?? null });
 }

@@ -1,113 +1,115 @@
-import { NextRequest } from "next/server";
-import argon2 from "argon2";
-import { PrismaClient, type UserRole } from "@prisma/client";
-import { createSessionToken, SESSION_COOKIE, CSRF_COOKIE } from "@/lib/session-token";
+import { vi } from "vitest";
+import { PrismaClient } from "@prisma/client";
+import jwt from "jsonwebtoken";
+import { createHmac } from "crypto";
 
 export const prisma = new PrismaClient();
 
-const CSRF_VALUE = "test-csrf-token";
+type Cookie = { name: string; value: string };
+
+// One mutable cookie jar shared with the mocked next/headers module, so a test
+// can "sign in" by calling signIn() before invoking a route handler.
+export const cookieJar = new Map<string, string>();
+
+vi.mock("next/headers", () => ({
+  cookies: () => ({
+    get: (name: string): Cookie | undefined => {
+      const value = cookieJar.get(name);
+      return value === undefined ? undefined : { name, value };
+    },
+    set: (name: string, value: string) => void cookieJar.set(name, value),
+    delete: (name: string) => void cookieJar.delete(name)
+  })
+}));
+
+// Realtime publishing is a side effect over HTTP; tests assert on the database.
+vi.mock("@/lib/realtime", () => ({ publish: vi.fn(async () => {}) }));
+
+export type Session = { token: string; csrf: string };
+
+export function signIn(user: { id: string; role: string; email: string }): Session {
+  const secret = process.env.SESSION_SECRET!;
+  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, secret, {
+    expiresIn: "1h"
+  });
+  const csrf = createHmac("sha256", secret).update(token).digest("hex");
+  cookieJar.set("macpoll_session", token);
+  cookieJar.set("macpoll_csrf", csrf);
+  return { token, csrf };
+}
+
+export function signOut(): void {
+  cookieJar.clear();
+}
 
 let counter = 0;
-function unique(prefix: string): string {
-  counter += 1;
-  return `${prefix}-${Date.now()}-${counter}`;
-}
+const uniq = () => `${Date.now()}-${counter++}`;
 
-export type TestUser = Awaited<ReturnType<typeof createUser>>;
-
-export async function createUser(role: UserRole, password = "password123") {
-  const email = `${unique(role.toLowerCase())}@mcmaster.ca`;
-  const user = await prisma.user.create({
+export async function makeUser(role: "STUDENT" | "INSTRUCTOR" | "ADMIN" = "STUDENT") {
+  return prisma.user.create({
     data: {
-      email,
+      name: `Test ${role}`,
+      email: `test-${uniq()}@mcmaster.ca`,
+      password: "not-a-real-hash",
       role,
-      passwordHash: await argon2.hash(password, { type: argon2.argon2id }),
-      verifiedAt: new Date()
+      emailVerified: true
     }
   });
-  return { ...user, password };
 }
 
-export async function createCourse(instructor: { id: string }) {
+export async function makeCourse(instructorId: string) {
   return prisma.course.create({
     data: {
       name: "Test Course",
-      term: "Fall 2026",
-      ownerInstructorId: instructor.id,
-      joinCode: unique("JC").slice(-8).toUpperCase()
+      code: `TEST-${uniq()}`,
+      // Stored uppercase: joinCourseSchema uppercases whatever a student types.
+      joinCode: `J${(counter++).toString(36)}${Math.random().toString(36).slice(2, 8)}`.toUpperCase(),
+      instructorId
     }
   });
 }
 
-export async function enroll(course: { id: string }, user: { id: string }) {
-  return prisma.enrollment.create({
-    data: { courseId: course.id, userId: user.id, roleInCourse: "STUDENT" }
-  });
+export async function enroll(studentId: string, courseId: string) {
+  return prisma.enrollment.create({ data: { studentId, courseId } });
 }
 
-export async function createSession(course: { id: string }, instructor: { id: string }) {
-  return prisma.liveSession.create({
-    data: {
-      courseId: course.id,
-      createdById: instructor.id,
-      sessionCode: unique("SC").slice(-8).toUpperCase()
-    }
-  });
-}
-
-export async function createPoll(
-  session: { id: string },
-  overrides: Record<string, unknown> = {}
+export async function makePoll(
+  courseId: string,
+  overrides: { status?: "DRAFT" | "ACTIVE" | "ENDED"; type?: "MULTIPLE_CHOICE" | "SHORT_ANSWER" } = {}
 ) {
   return prisma.poll.create({
     data: {
-      liveSessionId: session.id,
-      type: "MULTIPLE_CHOICE",
-      questionText: "Pick one",
-      optionsJson: ["A", "B"],
-      openedAt: new Date(),
-      ...overrides
-    } as never
+      courseId,
+      title: "Test poll",
+      question: "Which one?",
+      type: overrides.type ?? "MULTIPLE_CHOICE",
+      status: overrides.status ?? "ACTIVE",
+      startedAt: new Date(),
+      options: {
+        create: [
+          { text: "A", isCorrect: true, orderIndex: 0 },
+          { text: "B", isCorrect: false, orderIndex: 1 }
+        ]
+      }
+    },
+    include: { options: { orderBy: { orderIndex: "asc" } } }
   });
 }
 
-type RequestOptions = {
-  method?: string;
-  body?: unknown;
-  user?: { id: string; role: UserRole; email: string } | null;
-  /** Omit the CSRF header to exercise the rejection path. */
-  csrf?: boolean;
-};
-
-export function buildRequest(url: string, options: RequestOptions = {}): NextRequest {
-  const { method = "GET", body, user, csrf = true } = options;
-
-  const cookies: string[] = [];
-  if (user) {
-    const token = createSessionToken({ userId: user.id, role: user.role, email: user.email });
-    cookies.push(`${SESSION_COOKIE}=${token}`);
-    if (csrf) cookies.push(`${CSRF_COOKIE}=${CSRF_VALUE}`);
-  }
-
-  const headers = new Headers();
-  if (cookies.length) headers.set("cookie", cookies.join("; "));
-  if (body !== undefined) headers.set("content-type", "application/json");
-  if (user && csrf) headers.set("x-macpoll-csrf", CSRF_VALUE);
-
+/** Builds a NextRequest carrying the current session's CSRF header. */
+export function post(url: string, body: unknown, session?: Session) {
+  const { NextRequest } = require("next/server");
   return new NextRequest(`http://localhost:3000${url}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body)
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(session ? { "x-csrf-token": session.csrf } : {})
+    },
+    body: JSON.stringify(body)
   });
 }
 
-export async function readJson(response: Response) {
-  return { status: response.status, body: await response.json() };
-}
-
-/** Removes everything this suite created, honouring FK order via cascades. */
-export async function resetDatabase() {
-  await prisma.$executeRawUnsafe(
-    `TRUNCATE TABLE "Response","Attendance","Poll","LiveSession","Enrollment","AuditLog","Course","VerificationToken","User" RESTART IDENTITY CASCADE`
-  );
+export function get(url: string) {
+  const { NextRequest } = require("next/server");
+  return new NextRequest(`http://localhost:3000${url}`, { method: "GET" });
 }

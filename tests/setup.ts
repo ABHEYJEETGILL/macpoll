@@ -1,13 +1,13 @@
-import { config as loadEnv } from "dotenv";
+import { beforeAll } from "vitest";
 
-loadEnv({ path: ".env.test" });
-loadEnv();
+Object.assign(process.env, { NODE_ENV: "test" });
+process.env.SESSION_SECRET ??= "test-session-secret-that-is-long-enough-01";
+process.env.REALTIME_INTERNAL_SECRET ??= "test-realtime-secret-that-is-long-enough-1";
+process.env.REALTIME_INTERNAL_URL ??= "http://localhost:4000";
+process.env.REALTIME_ALLOWED_ORIGINS ??= "http://localhost:3000";
 
-// Deterministic secrets so signed tokens are comparable across runs.
-process.env.SESSION_SECRET ??= "test-session-secret-0123456789abcdef0123456789abcdef";
-process.env.REALTIME_INTERNAL_SECRET ??= "test-realtime-secret-0123456789abcdef0123456789abcdef";
-process.env.REALTIME_INTERNAL_URL ??= "http://localhost:4999";
-
-if (process.env.TEST_DATABASE_URL) {
-  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
-}
+beforeAll(() => {
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL must be set to run the test suite.");
+  }
+});

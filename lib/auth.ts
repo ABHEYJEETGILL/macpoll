@@ -1,33 +1,25 @@
-import { cookies } from "next/headers";
-import crypto from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 import argon2 from "argon2";
-import { isProduction } from "./env";
-import {
-  CSRF_COOKIE,
-  CSRF_HEADER,
-  SESSION_COOKIE,
-  SESSION_TTL_SECONDS,
-  createSessionToken,
-  readCookie,
-  safeEqual,
-  verifySessionToken,
-  type SessionPayload,
-  type SignedSession
-} from "./session-token";
+import jwt from "jsonwebtoken";
+import { cookies } from "next/headers";
+import { env, isProduction } from "./env";
 
-export {
-  SESSION_COOKIE,
-  CSRF_COOKIE,
-  CSRF_HEADER,
-  createSessionToken,
-  verifySessionToken,
-  readCookie,
-  safeEqual
+export const SESSION_COOKIE = "macpoll_session";
+export const CSRF_COOKIE = "macpoll_csrf";
+export const CSRF_HEADER = "x-csrf-token";
+
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 7; // 7 days
+
+export type Role = "STUDENT" | "INSTRUCTOR" | "ADMIN";
+
+export type SessionPayload = {
+  id: string;
+  role: Role;
+  email: string;
 };
-export type { SessionPayload, SignedSession };
 
 export async function hashPassword(password: string): Promise<string> {
-  return argon2.hash(password, { type: argon2.argon2id });
+  return argon2.hash(password);
 }
 
 export async function verifyPassword(hash: string, password: string): Promise<boolean> {
@@ -38,46 +30,67 @@ export async function verifyPassword(hash: string, password: string): Promise<bo
   }
 }
 
-export function getSessionFromRequest(req: Request): SignedSession | null {
-  const token = readCookie(req.headers.get("cookie") ?? "", SESSION_COOKIE);
-  if (!token) return null;
-  return verifySessionToken(token);
+// The CSRF token is an HMAC of the session token, so a token minted for one
+// session cannot be replayed against another. It is readable by JS (the client
+// echoes it back in a header); knowing it is useless without the paired
+// httpOnly session cookie.
+function deriveCsrfToken(sessionToken: string): string {
+  return createHmac("sha256", env().SESSION_SECRET).update(sessionToken).digest("hex");
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }
 
 export function setSessionCookie(payload: SessionPayload): { csrfToken: string } {
-  const store = cookies();
-  const secure = isProduction();
+  const token = jwt.sign(payload, env().SESSION_SECRET, { expiresIn: "7d" });
+  const csrfToken = deriveCsrfToken(token);
 
-  store.set(SESSION_COOKIE, createSessionToken(payload), {
-    httpOnly: true,
-    sameSite: "lax",
-    secure,
+  const cookieStore = cookies();
+  const common = {
+    secure: isProduction(),
+    sameSite: "lax" as const,
     path: "/",
-    maxAge: SESSION_TTL_SECONDS
-  });
+    maxAge: COOKIE_MAX_AGE
+  };
 
-  // Double-submit CSRF: readable by JS so the client can echo it in a header.
-  const csrfToken = crypto.randomBytes(32).toString("hex");
-  store.set(CSRF_COOKIE, csrfToken, {
-    httpOnly: false,
-    sameSite: "lax",
-    secure,
-    path: "/",
-    maxAge: SESSION_TTL_SECONDS
-  });
+  cookieStore.set(SESSION_COOKIE, token, { ...common, httpOnly: true });
+  cookieStore.set(CSRF_COOKIE, csrfToken, { ...common, httpOnly: false });
 
   return { csrfToken };
 }
 
-export function clearSessionCookie(): void {
-  const store = cookies();
-  store.delete(SESSION_COOKIE);
-  store.delete(CSRF_COOKIE);
+export function clearSessionCookies(): void {
+  const cookieStore = cookies();
+  cookieStore.delete(SESSION_COOKIE);
+  cookieStore.delete(CSRF_COOKIE);
 }
 
-export function hasValidCsrf(req: Request): boolean {
-  const header = req.headers.get(CSRF_HEADER);
-  const cookie = readCookie(req.headers.get("cookie") ?? "", CSRF_COOKIE);
-  if (!header || !cookie) return false;
-  return safeEqual(header, cookie);
+export function getSessionPayload(): SessionPayload | null {
+  try {
+    const token = cookies().get(SESSION_COOKIE)?.value;
+    if (!token) return null;
+    const decoded = jwt.verify(token, env().SESSION_SECRET) as jwt.JwtPayload & SessionPayload;
+    if (!decoded?.id || !decoded?.role) return null;
+    return { id: decoded.id, role: decoded.role, email: decoded.email };
+  } catch {
+    return null;
+  }
+}
+
+/** Verifies the submitted CSRF token against the current session cookie. */
+export function verifyCsrf(submitted: string | null | undefined): boolean {
+  if (!submitted) return false;
+  const token = cookies().get(SESSION_COOKIE)?.value;
+  if (!token) return false;
+  return safeEqual(submitted, deriveCsrfToken(token));
+}
+
+/** Convenience wrapper used by route handlers: `const session = await auth()`. */
+export async function auth(): Promise<{ user: SessionPayload } | null> {
+  const payload = getSessionPayload();
+  return payload ? { user: payload } : null;
 }

@@ -1,30 +1,52 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { jwtVerify } from "jose";
+
+const SESSION_COOKIE = "macpoll_session";
 
 const PROTECTED_PREFIXES = ["/dashboard", "/instructor", "/student"];
+const INSTRUCTOR_ONLY = ["/instructor"];
 
-/**
- * Bounces signed-out visitors to the login page before a protected page
- * renders, so they never see a dashboard skeleton that then redirects.
- *
- * This is a routing convenience, not the security boundary: middleware runs on
- * the edge runtime without node:crypto, so it only checks that a session cookie
- * is present. Every API route independently verifies the signature and the
- * caller's role.
- */
-export function middleware(req: NextRequest) {
-  const { pathname, search } = req.nextUrl;
+type Claims = { id?: string; role?: string };
 
-  if (!PROTECTED_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
-    return NextResponse.next();
+// Runs in the Edge runtime, so it cannot import lib/env (node:crypto). Missing
+// secret is treated as "nobody is authenticated" rather than falling back to a
+// shared default, which would have made every session forgeable.
+async function readClaims(token: string | undefined): Promise<Claims | null> {
+  const secret = process.env.SESSION_SECRET;
+  if (!token || !secret || secret.length < 32) return null;
+  try {
+    const { payload } = await jwtVerify(token, new TextEncoder().encode(secret));
+    return payload as Claims;
+  } catch {
+    return null;
+  }
+}
+
+export async function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+
+  const isProtected = PROTECTED_PREFIXES.some((p) => pathname.startsWith(p));
+  if (!isProtected) return NextResponse.next();
+
+  const claims = await readClaims(req.cookies.get(SESSION_COOKIE)?.value);
+
+  if (!claims) {
+    const loginUrl = new URL("/auth/login", req.url);
+    loginUrl.searchParams.set("next", pathname);
+    return NextResponse.redirect(loginUrl);
   }
 
-  if (req.cookies.has("macpoll_session")) {
-    return NextResponse.next();
+  if (
+    INSTRUCTOR_ONLY.some((p) => pathname.startsWith(p)) &&
+    claims.role !== "INSTRUCTOR" &&
+    claims.role !== "ADMIN"
+  ) {
+    return NextResponse.redirect(new URL("/dashboard", req.url));
   }
 
-  const loginUrl = new URL("/auth/login", req.url);
-  loginUrl.searchParams.set("next", `${pathname}${search}`);
-  return NextResponse.redirect(loginUrl);
+  const response = NextResponse.next();
+  response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  return response;
 }
 
 export const config = {

@@ -26,36 +26,28 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://macpoll:macpoll@localhost:5432/macpoll_test?schema=public
-      TEST_DATABASE_URL: postgresql://macpoll:macpoll@localhost:5432/macpoll_test?schema=public
-      SESSION_SECRET: ci-session-secret-0123456789abcdef0123456789abcdef
-      REALTIME_INTERNAL_SECRET: ci-realtime-secret-0123456789abcdef0123456789abcdef
+      SESSION_SECRET: ci-session-secret-that-is-long-enough-000000
+      REALTIME_INTERNAL_SECRET: ci-realtime-secret-that-is-long-enough-0000
       REALTIME_INTERNAL_URL: http://localhost:4000
-      NEXT_PUBLIC_REALTIME_URL: http://localhost:4000
+      REALTIME_ALLOWED_ORIGINS: http://localhost:3000
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
       - run: npm ci
-
       - name: Apply migrations
         run: npx prisma migrate deploy
-
       - name: Generate Prisma client
         run: npx prisma generate
-
       - name: Typecheck
         run: npm run typecheck
-
       - name: Lint
         run: npm run lint
-
       - name: Test
         run: npm test
-
       - name: Build
         run: npm run build

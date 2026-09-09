@@ -1,45 +1,23 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { route, Errors } from "@/lib/api";
+import { Errors, route } from "@/lib/api";
 import { joinCourseSchema } from "@/lib/validation";
 
 export const POST = route(
-  {
-    body: joinCourseSchema,
-    rateLimit: { name: "join-course", limit: 30, windowMs: 60_000 }
-  },
-  async ({ body, user }) => {
-    const course = await prisma.course.findUnique({
-      where: { joinCode: body.joinCode },
-      include: { ownerInstructor: { select: { email: true } } }
-    });
-    if (!course) throw Errors.badRequest("That join code does not match any course.");
+  { roles: ["STUDENT"], body: joinCourseSchema, rateLimit: { limit: 20, windowMs: 60_000, scope: "course-join" } },
+  async ({ user, body }) => {
+    const course = await prisma.course.findUnique({ where: { joinCode: body.joinCode } });
+    if (!course) throw Errors.badRequest("That join code is not valid.");
+    if (!course.isActive) throw Errors.badRequest("That course is no longer accepting students.");
 
-    if (course.ownerInstructorId === user.id) {
-      throw Errors.badRequest("You teach this course, so you are already on its roster.");
-    }
-
-    const existing = await prisma.enrollment.findUnique({
-      where: { courseId_userId: { courseId: course.id, userId: user.id } }
+    // Idempotent: re-joining is a no-op rather than an error, and the unique
+    // index on (studentId, courseId) settles concurrent submissions.
+    await prisma.enrollment.upsert({
+      where: { studentId_courseId: { studentId: user.id, courseId: course.id } },
+      create: { studentId: user.id, courseId: course.id },
+      update: {}
     });
 
-    if (!existing) {
-      await prisma.enrollment.create({
-        data: { courseId: course.id, userId: user.id, roleInCourse: user.role }
-      });
-    }
-
-    return NextResponse.json(
-      {
-        course: {
-          id: course.id,
-          name: course.name,
-          term: course.term,
-          instructorEmail: course.ownerInstructor.email
-        },
-        alreadyEnrolled: existing !== null
-      },
-      { status: existing ? 200 : 201 }
-    );
+    return NextResponse.json({ ...course, joinCode: undefined });
   }
 );
