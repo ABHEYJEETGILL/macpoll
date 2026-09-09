@@ -1,36 +1,28 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { Errors, route } from "@/lib/api";
 import { rateLimit } from "@/lib/rateLimit";
 
-export async function POST(req: NextRequest) {
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`verify:${ip}`, 20, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+const schema = z.object({ code: z.string().min(1).max(16) });
+
+export const POST = route({ roles: "any", body: schema }, async ({ user, body }) => {
+  if (!rateLimit(`verify:${user.id}`, 10, 60_000).ok) {
+    throw Errors.tooMany("Too many attempts. Try again in a minute.");
   }
 
-  const { email, code } = await req.json().catch(() => ({ email: "", code: "" }));
-  if (!email || !code) {
-    return NextResponse.json({ error: "Missing email or code" }, { status: 400 });
-  }
+  const found = await prisma.user.findUnique({ where: { id: user.id } });
+  if (!found) throw Errors.notFound("Account");
+  if (found.emailVerified) return NextResponse.json({ success: true });
 
-  const token = await prisma.verificationToken.findFirst({
-    where: { email, token: code }
-  });
-
-  if (!token || token.expiresAt < new Date()) {
-    return NextResponse.json({ error: "Invalid or expired code" }, { status: 400 });
+  if (!found.verificationToken || found.verificationToken !== body.code.toUpperCase()) {
+    throw Errors.badRequest("Invalid verification code.");
   }
 
   await prisma.user.update({
-    where: { email },
-    data: { verifiedAt: new Date() }
-  });
-
-  await prisma.verificationToken.delete({
-    where: { id: token.id }
+    where: { id: user.id },
+    data: { emailVerified: true, verificationToken: null }
   });
 
   return NextResponse.json({ success: true });
-}
-
+});

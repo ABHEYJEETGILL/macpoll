@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { Plus, Loader2, Play, Square, Trash2, BarChart3, Eye, EyeOff, Image, BookOpen } from 'lucide-react'
 import { useSocket } from '@/hooks/useSocket'
+import { apiFetch, ApiRequestError } from '@/lib/client/api'
 
 interface Course        { id: string; name: string; code: string }
 interface ClassSession  { id: string; title: string; isActive: boolean }
@@ -43,7 +44,7 @@ export default function InstructorPollsPage() {
   const [creating,   setCreating]  = useState(false)
   const [formErr,    setFormErr]   = useState('')
 
-  const { emit } = useSocket(selCourse, 'INSTRUCTOR')
+  const { on } = useSocket(selCourse, 'INSTRUCTOR')
 
   const loadData = useCallback(async (cid?: string) => {
     setLoading(true)
@@ -69,6 +70,13 @@ export default function InstructorPollsPage() {
 
   useEffect(() => { loadData() }, []) // eslint-disable-line
 
+  useEffect(() => {
+    return on('poll-progress', ({ pollId, total }: { pollId: string; total: number }) => {
+      setPolls((prev) => prev.map((p) =>
+        p.id === pollId ? { ...p, _count: { ...p._count, responses: total } } : p))
+    })
+  }, [on])
+
   function setField(f: string, v: unknown) {
     setForm((p) => ({ ...p, [f]: v }))
   }
@@ -92,24 +100,18 @@ export default function InstructorPollsPage() {
   }
 
   async function changePollStatus(pollId: string, action: 'start' | 'end') {
-    const res = await fetch(`/api/polls/${pollId}`, {
-      method:  'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ action }),
+    // The server broadcasts poll-started / poll-ended after it writes; clients
+    // are not permitted to emit those events themselves.
+    const updated = await apiFetch<Poll>(`/api/polls/${pollId}`, {
+      method: 'PATCH',
+      body:   JSON.stringify({ action }),
     })
-    if (res.ok) {
-      const updated = await res.json()
-      setPolls((prev) => prev.map((p) => p.id === pollId ? { ...p, status: updated.status } : p))
-      emit(action === 'start' ? 'poll-started' : 'poll-ended', {
-        courseId: selCourse,
-        ...(action === 'start' ? { poll: updated } : { pollId }),
-      })
-    }
+    setPolls((prev) => prev.map((p) => p.id === pollId ? { ...p, status: updated.status } : p))
   }
 
   async function deletePoll(pollId: string) {
     if (!confirm('Delete this poll?')) return
-    await fetch(`/api/polls/${pollId}`, { method: 'DELETE' })
+    await apiFetch(`/api/polls/${pollId}`, { method: 'DELETE' })
     setPolls((prev) => prev.filter((p) => p.id !== pollId))
   }
 
@@ -127,18 +129,19 @@ export default function InstructorPollsPage() {
     }
     if (form.type === 'SHORT_ANSWER' || form.type === 'TRUE_FALSE') delete body.options
 
-    const res  = await fetch('/api/polls', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-    })
-    const data = await res.json()
-    if (!res.ok) { setFormErr(data.error); setCreating(false); return }
-
-    setPolls((prev) => [data, ...prev])
-    setShowForm(false)
-    setForm({ ...defaultForm, courseId: selCourse })
-    setCreating(false)
+    try {
+      const data = await apiFetch<Poll>('/api/polls', {
+        method: 'POST',
+        body:   JSON.stringify(body),
+      })
+      setPolls((prev) => [data, ...prev])
+      setShowForm(false)
+      setForm({ ...defaultForm, courseId: selCourse })
+    } catch (err) {
+      setFormErr(err instanceof ApiRequestError ? err.message : 'Could not create the poll.')
+    } finally {
+      setCreating(false)
+    }
   }
 
   const filteredPolls = selCourse ? polls.filter((p) => p.courseId === selCourse) : polls

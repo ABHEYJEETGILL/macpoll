@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { CheckCircle2, Clock, Loader2, BarChart3, Send, EyeOff } from 'lucide-react'
 import { useSocket } from '@/hooks/useSocket'
 import { formatDateTime } from '@/lib/utils'
+import { apiFetch, ApiRequestError } from '@/lib/client/api'
 
 interface Poll {
   id: string; title: string; question: string | null; type: string; status: string
@@ -52,17 +53,17 @@ export default function StudentCoursePage() {
   useEffect(() => { load() }, [load])
 
   useEffect(() => {
-    const offStart = on('poll-started', (poll: unknown) => {
-      setPolls((prev) => [poll as Poll, ...prev.filter((p) => p.id !== (poll as Poll).id)])
+    const offStart = on('poll-started', (poll: Poll) => {
+      setPolls((prev) => [poll, ...prev.filter((p) => p.id !== poll.id)])
     })
-    const offEnd = on('poll-ended', ({ pollId }: unknown) => {
-      setPolls((prev) => prev.map((p) => p.id === (pollId as string) ? { ...p, status: 'ENDED' } : p))
+    const offEnd = on('poll-ended', ({ pollId }: { pollId: string }) => {
+      setPolls((prev) => prev.map((p) => p.id === pollId ? { ...p, status: 'ENDED' } : p))
     })
-    const offAttOpen = on('attendance-opened', (sess: unknown) => {
-      setSessions((prev) => [sess as AttendanceSession, ...prev])
+    const offAttOpen = on('attendance-opened', (sess: AttendanceSession) => {
+      setSessions((prev) => [sess, ...prev.filter((s) => s.id !== sess.id)])
     })
-    const offAttClose = on('attendance-closed', ({ sessionId }: unknown) => {
-      setSessions((prev) => prev.map((s) => s.id === (sessionId as string) ? { ...s, isOpen: false } : s))
+    const offAttClose = on('attendance-closed', ({ sessionId }: { sessionId: string }) => {
+      setSessions((prev) => prev.map((s) => s.id === sessionId ? { ...s, isOpen: false } : s))
     })
     return () => { offStart(); offEnd(); offAttOpen(); offAttClose() }
   }, [on])
@@ -73,27 +74,29 @@ export default function StudentCoursePage() {
     if (type === 'SHORT_ANSWER') body.shortAnswer = textAns[pollId] ?? ''
     else body.optionId = selected[pollId] ?? ''
 
-    const res  = await fetch('/api/polls/respond', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-    })
-    const data = await res.json()
-    setMsgs((p) => ({ ...p, [pollId]: { type: res.ok ? 'success' : 'error', text: res.ok ? 'Response submitted!' : data.error } }))
-    if (res.ok) load()
-    setSubmitting((p) => ({ ...p, [pollId]: false }))
+    try {
+      await apiFetch('/api/polls/respond', { method: 'POST', body: JSON.stringify(body) })
+      setMsgs((p) => ({ ...p, [pollId]: { type: 'success', text: 'Response submitted!' } }))
+      load()
+    } catch (err) {
+      const text = err instanceof ApiRequestError ? err.message : 'Could not submit your response.'
+      setMsgs((p) => ({ ...p, [pollId]: { type: 'error', text } }))
+    } finally {
+      setSubmitting((p) => ({ ...p, [pollId]: false }))
+    }
   }
 
   async function markAttendance(sessionId: string) {
     setSubmitting((p) => ({ ...p, [sessionId]: true }))
-    const res  = await fetch('/api/attendance/mark', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ sessionId }),
-    })
-    const data = await res.json()
-    setMsgs((p) => ({ ...p, [sessionId]: { type: res.ok ? 'success' : 'error', text: res.ok ? 'Attendance marked!' : data.error } }))
-    setSubmitting((p) => ({ ...p, [sessionId]: false }))
+    try {
+      await apiFetch('/api/attendance/mark', { method: 'POST', body: JSON.stringify({ sessionId }) })
+      setMsgs((p) => ({ ...p, [sessionId]: { type: 'success', text: 'Attendance marked!' } }))
+    } catch (err) {
+      const text = err instanceof ApiRequestError ? err.message : 'Could not mark attendance.'
+      setMsgs((p) => ({ ...p, [sessionId]: { type: 'error', text } }))
+    } finally {
+      setSubmitting((p) => ({ ...p, [sessionId]: false }))
+    }
   }
 
   if (loading) return <div className="flex items-center justify-center py-24"><Loader2 size={28} className="animate-spin text-maroon-700" /></div>

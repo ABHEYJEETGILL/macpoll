@@ -1,61 +1,52 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth } from "@/lib/permissions";
+import { Errors, route } from "@/lib/api";
+import { toCsv } from "@/lib/csv";
 
-export async function GET(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user || user.role !== "INSTRUCTOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+export const GET = route({ roles: ["INSTRUCTOR", "ADMIN"] }, async ({ req, user }) => {
+  const sessionId = req.nextUrl.searchParams.get("sessionId");
+  if (!sessionId) throw Errors.badRequest("sessionId is required.");
 
-  const { searchParams } = new URL(req.url);
-  const liveSessionId = searchParams.get("liveSessionId");
-  if (!liveSessionId) {
-    return NextResponse.json({ error: "Missing liveSessionId" }, { status: 400 });
-  }
-
-  const session = await prisma.liveSession.findUnique({
-    where: { id: liveSessionId },
+  const session = await prisma.attendanceSession.findUnique({
+    where: { id: sessionId },
     include: {
-      course: true,
-      attendances: {
-        include: { user: true }
-      },
-      polls: {
-        include: { responses: true }
+      course: { select: { name: true, code: true, instructorId: true } },
+      records: {
+        include: { student: { select: { name: true, email: true } } },
+        orderBy: { markedAt: "asc" }
       }
     }
   });
-
-  if (!session || session.course.ownerInstructorId !== user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!session) throw Errors.notFound("Attendance session");
+  if (session.course.instructorId !== user.id && user.role !== "ADMIN") {
+    throw Errors.forbidden("You do not own this course.");
   }
 
-  const lines: string[] = [];
-  lines.push(`Course,${session.course.name} (${session.course.term})`);
-  lines.push(`Session Code,${session.sessionCode}`);
-  lines.push("");
-  lines.push("Attendance");
-  lines.push("Email,Present,First Join At");
-  for (const a of session.attendances) {
-    lines.push(`${a.user.email},${a.presentBool ? "YES" : "NO"},${a.firstJoinAt.toISOString()}`);
-  }
+  const enrolled = await prisma.enrollment.findMany({
+    where: { courseId: session.courseId },
+    include: { student: { select: { id: true, name: true, email: true } } }
+  });
+  const markedAt = new Map(session.records.map((r) => [r.studentId, r.markedAt]));
 
-  lines.push("");
-  lines.push("Poll Results");
-  lines.push("Poll Question,Response Count");
-  for (const p of session.polls) {
-    lines.push(`"${p.questionText.replace(/"/g, '""')}",${p.responses.length}`);
-  }
+  const csv = toCsv(
+    ["Name", "Email", "Present", "Marked At"],
+    enrolled.map((e) => [
+      e.student.name,
+      e.student.email,
+      markedAt.has(e.student.id) ? "YES" : "NO",
+      markedAt.get(e.student.id)?.toISOString() ?? ""
+    ])
+  );
 
-  const csv = lines.join("\n");
+  const filename = `attendance-${session.course.code}-${session.id}.csv`.replace(
+    /[^A-Za-z0-9._-]/g,
+    "_"
+  );
 
   return new NextResponse(csv, {
-    status: 200,
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="macpoll-session-${session.sessionCode}.csv"`
+      "Content-Disposition": `attachment; filename="${filename}"`
     }
   });
-}
-
+});

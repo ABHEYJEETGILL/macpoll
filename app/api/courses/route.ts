@@ -1,80 +1,39 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Errors, route } from "@/lib/api";
+import { generateUniqueCode } from "@/lib/codes";
 import { courseCreateSchema } from "@/lib/validation";
-import { rateLimit } from "@/lib/rateLimit";
-import { requireAuth } from "@/lib/permissions";
 
-function generateJoinCode() {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
-}
-
-export async function GET(req: NextRequest) {
-  const user = await requireAuth(req);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  if (user.role === "INSTRUCTOR") {
+export const GET = route({ roles: "any" }, async ({ user }) => {
+  if (user.role === "INSTRUCTOR" || user.role === "ADMIN") {
     const courses = await prisma.course.findMany({
-      where: { ownerInstructorId: user.id },
-      orderBy: { createdAt: "desc" }
+      where: { instructorId: user.id },
+      orderBy: { createdAt: "desc" },
+      include: { _count: { select: { enrollments: true, polls: true } } }
     });
-    return NextResponse.json({ courses });
+    return NextResponse.json(courses);
   }
 
   const enrollments = await prisma.enrollment.findMany({
-    where: { userId: user.id },
+    where: { studentId: user.id },
     include: { course: true },
-    orderBy: { createdAt: "desc" }
+    orderBy: { enrolledAt: "desc" }
   });
-  return NextResponse.json({
-    courses: enrollments.map((e) => e.course)
-  });
-}
+  return NextResponse.json(enrollments.map((e) => e.course));
+});
 
-export async function POST(req: NextRequest) {
-  try {
-    const user = await requireAuth(req);
-    if (!user || user.role !== "INSTRUCTOR") {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
+export const POST = route(
+  { roles: ["INSTRUCTOR", "ADMIN"], body: courseCreateSchema, rateLimit: { limit: 30, windowMs: 60_000, scope: "course-create" } },
+  async ({ user, body }) => {
+    const joinCode = await generateUniqueCode(async (code) => {
+      return (await prisma.course.findUnique({ where: { joinCode: code }, select: { id: true } })) !== null;
+    });
+    if (!joinCode) throw Errors.conflict("Could not allocate a join code. Try again.");
 
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`create-course:${ip}`, 30, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    const course = await prisma.course.create({
+      data: { ...body, joinCode, instructorId: user.id }
+    });
+
+    return NextResponse.json(course, { status: 201 });
   }
-
-  const json = await req.json().catch(() => null);
-  const parsed = courseCreateSchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-  const { name, term } = parsed.data;
-
-  const joinCode = generateJoinCode();
-  const course = await prisma.course.create({
-    data: {
-      name,
-      term,
-      joinCode,
-      ownerInstructorId: user.id
-    }
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      instructorId: user.id,
-      action: "CREATE_COURSE",
-      metadata: { courseId: course.id }
-    }
-  });
-
-  return NextResponse.json({ course }, { status: 201 });
-  } catch (err) {
-    console.error("[POST /api/courses]", err);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
-  }
-
-}
-
+);

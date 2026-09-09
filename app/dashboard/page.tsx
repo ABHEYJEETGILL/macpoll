@@ -4,112 +4,90 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { ApiRequestError, apiFetch } from "@/lib/client/api";
 
 type User = {
   id: string;
+  name: string;
   email: string;
-  role: "INSTRUCTOR" | "STUDENT";
-  verifiedAt: string | null;
+  role: "INSTRUCTOR" | "STUDENT" | "ADMIN";
+  emailVerified: boolean;
 };
 
 type Course = {
   id: string;
   name: string;
-  term: string;
-  joinCode: string;
-};
-
-type LiveSession = {
-  id: string;
-  sessionCode: string;
-  startedAt: string;
-  endedAt: string | null;
+  code: string;
+  semester: string | null;
+  joinCode?: string;
+  _count?: { enrollments: number; polls: number };
 };
 
 export default function DashboardPage() {
   const [user, setUser] = useState<User | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
-  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<LiveSession[]>([]);
-  const [courseName, setCourseName] = useState("");
-  const [courseTerm, setCourseTerm] = useState("");
+  const [form, setForm] = useState({ name: "", code: "", semester: "" });
   const [joinCode, setJoinCode] = useState("");
+  const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
     async function bootstrap() {
-      const meRes = await fetch("/api/auth/me");
-      const me = await meRes.json();
-      if (!me.user) {
+      try {
+        const me = await apiFetch<{ user: User | null }>("/api/auth/me");
+        if (!me.user) {
+          window.location.href = "/auth/login";
+          return;
+        }
+        setUser(me.user);
+        setCourses(await apiFetch<Course[]>("/api/courses"));
+      } catch {
         window.location.href = "/auth/login";
-        return;
       }
-      setUser(me.user);
-      const coursesRes = await fetch("/api/courses");
-      const coursesJson = await coursesRes.json();
-      setCourses(coursesJson.courses ?? []);
     }
     bootstrap();
   }, []);
 
-  async function refreshSessions(courseId: string) {
-    const res = await fetch(`/api/courses/${courseId}/sessions`);
-    const data = await res.json();
-    setSessions(data.sessions ?? []);
-  }
-
   async function handleCreateCourse() {
-  setStatus(null);
-  const res = await fetch("/api/courses", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: courseName, term: courseTerm })
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    setStatus(data.error ?? "Failed to create course");
-    return;
+    setStatus(null);
+    setBusy(true);
+    try {
+      const course = await apiFetch<Course>("/api/courses", {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.name,
+          code: form.code,
+          semester: form.semester || undefined
+        })
+      });
+      setCourses((prev) => [course, ...prev]);
+      setForm({ name: "", code: "", semester: "" });
+    } catch (err) {
+      setStatus(err instanceof ApiRequestError ? err.message : "Could not create the course.");
+    } finally {
+      setBusy(false);
+    }
   }
-  setCourses((prev) => [data.course, ...prev]);
-  setCourseName("");
-  setCourseTerm("");
-}
 
-async function handleJoinCourse() {
-  setStatus(null);
-  const res = await fetch("/api/courses/join", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ joinCode })
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    setStatus(data.error ?? "Failed to join course");
-    return;
+  async function handleJoinCourse() {
+    setStatus(null);
+    setBusy(true);
+    try {
+      const course = await apiFetch<Course>("/api/courses/join", {
+        method: "POST",
+        body: JSON.stringify({ joinCode })
+      });
+      setCourses((prev) =>
+        prev.some((c) => c.id === course.id) ? prev : [course, ...prev]
+      );
+      setJoinCode("");
+      setStatus(`Joined ${course.name}.`);
+    } catch (err) {
+      setStatus(err instanceof ApiRequestError ? err.message : "Could not join the course.");
+    } finally {
+      setBusy(false);
+    }
   }
-  setCourses((prev) => [data.course, ...prev]);
-  setJoinCode("");
-}
-
-async function handleCreateSession(courseId: string) {
-  setStatus(null);
-  const res = await fetch(`/api/courses/${courseId}/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({})
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    setStatus(data.error ?? "Failed to create session");
-    return;
-  }
-  setSelectedCourseId(courseId);
-  await refreshSessions(courseId);
-  setStatus(`Session started with code ${data.session.sessionCode}`);
-}
 
   if (!user) {
     return (
@@ -119,7 +97,7 @@ async function handleCreateSession(courseId: string) {
     );
   }
 
-  const isInstructor = user.role === "INSTRUCTOR";
+  const isInstructor = user.role === "INSTRUCTOR" || user.role === "ADMIN";
 
   return (
     <div className="max-w-5xl px-4 py-8 mx-auto">
@@ -130,68 +108,72 @@ async function handleCreateSession(courseId: string) {
             Signed in as {user.email} ({isInstructor ? "Instructor" : "Student"})
           </p>
         </div>
-        <Button
-          variant="secondary"
-          onClick={async () => {
-            await fetch("/api/auth/logout", { method: "POST" });
-            window.location.href = "/";
-          }}
-        >
-          Log out
-        </Button>
+        <div className="flex items-center gap-2">
+          {isInstructor && (
+            <Link href="/instructor/polls" className="btn-primary">
+              Manage polls
+            </Link>
+          )}
+          <Button
+            variant="secondary"
+            onClick={async () => {
+              await apiFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+              window.location.href = "/";
+            }}
+          >
+            Log out
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-6 md:grid-cols-3">
         <section className="p-4 bg-white border rounded-lg shadow-sm md:col-span-2">
           <h2 className="mb-3 text-sm font-semibold text-slate-800">Courses</h2>
-          {courses.length === 0 && (
-            <p className="text-sm text-slate-600">No courses yet. Create or join one below.</p>
-          )}
-          <ul className="space-y-2">
-            {courses.map((course) => (
-              <li
-                key={course.id}
-                className="flex items-center justify-between px-3 py-2 text-sm border rounded-md"
-              >
-                <div>
-                  <div className="font-medium text-slate-900">{course.name}</div>
-                  <div className="text-xs text-slate-500">{course.term}</div>
-                  {isInstructor && (
-                    <div className="text-xs text-slate-500">
-                      Join code: <span className="font-mono">{course.joinCode}</span>
+          {courses.length === 0 ? (
+            <p className="text-sm text-slate-600">
+              {isInstructor
+                ? "No courses yet. Create one to get started."
+                : "No courses yet. Enter a join code to enrol."}
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {courses.map((course) => (
+                <li
+                  key={course.id}
+                  className="flex items-center justify-between px-3 py-2 text-sm border rounded-md"
+                >
+                  <div>
+                    <div className="font-medium text-slate-900">
+                      {course.code} - {course.name}
                     </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
+                    {course.semester && (
+                      <div className="text-xs text-slate-500">{course.semester}</div>
+                    )}
+                    {isInstructor && course.joinCode && (
+                      <div className="text-xs text-slate-500">
+                        Join code: <span className="font-mono">{course.joinCode}</span>
+                      </div>
+                    )}
+                  </div>
                   {isInstructor ? (
-                    <Button
-                      variant="primary"
-                      onClick={() => handleCreateSession(course.id)}
-                      aria-label={`Start live session for ${course.name}`}
-                    >
-                      Start session
-                    </Button>
-                  ) : (
                     <Link
-                      href={`/student/join?courseId=${course.id}`}
+                      href="/instructor/polls"
                       className="text-xs font-medium underline text-mcmaster-maroon"
                     >
-                      Join live session
+                      Open
+                    </Link>
+                  ) : (
+                    <Link
+                      href={`/student/courses/${course.id}`}
+                      className="text-xs font-medium underline text-mcmaster-maroon"
+                    >
+                      Open
                     </Link>
                   )}
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      setSelectedCourseId(course.id);
-                      refreshSessions(course.id);
-                    }}
-                  >
-                    Sessions
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
 
         <section className="p-4 space-y-4 bg-white border rounded-lg shadow-sm">
@@ -199,20 +181,26 @@ async function handleCreateSession(courseId: string) {
             <>
               <h2 className="text-sm font-semibold text-slate-800">Create course</h2>
               <Input
-                label="Course name"
-                value={courseName}
-                onChange={(e) => setCourseName(e.target.value)}
+                label="Course code"
+                value={form.code}
+                onChange={(e) => setForm({ ...form, code: e.target.value })}
+                placeholder="e.g. COMPSCI 1JC3"
               />
               <Input
-                label="Term"
-                value={courseTerm}
-                onChange={(e) => setCourseTerm(e.target.value)}
+                label="Course name"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+              <Input
+                label="Semester"
+                value={form.semester}
+                onChange={(e) => setForm({ ...form, semester: e.target.value })}
                 placeholder="e.g. Fall 2026"
               />
               <Button
                 className="w-full"
                 onClick={handleCreateCourse}
-                disabled={!courseName || !courseTerm}
+                disabled={busy || !form.name || !form.code}
               >
                 Create
               </Button>
@@ -225,7 +213,7 @@ async function handleCreateSession(courseId: string) {
                 value={joinCode}
                 onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
               />
-              <Button className="w-full" onClick={handleJoinCourse} disabled={!joinCode}>
+              <Button className="w-full" onClick={handleJoinCourse} disabled={busy || !joinCode}>
                 Join
               </Button>
             </>
@@ -233,56 +221,7 @@ async function handleCreateSession(courseId: string) {
         </section>
       </div>
 
-      {selectedCourseId && sessions.length > 0 && (
-        <section className="p-4 mt-8 bg-white border rounded-lg shadow-sm">
-          <h2 className="mb-3 text-sm font-semibold text-slate-800">Live sessions</h2>
-          <ul className="space-y-2 text-sm">
-            {sessions.map((s) => (
-              <li
-                key={s.id}
-                className="flex items-center justify-between px-3 py-2 border rounded-md"
-              >
-                <div>
-                  <div className="font-mono text-xs text-slate-700">
-                    Code: <span className="font-semibold">{s.sessionCode}</span>
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    Started {new Date(s.startedAt).toLocaleString()}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {isInstructor ? (
-                    <Link
-                      href={`/instructor/session/${s.id}`}
-                      className="text-xs font-medium underline text-mcmaster-maroon"
-                    >
-                      Open dashboard
-                    </Link>
-                  ) : (
-                    <Link
-                      href={`/student/session/${s.id}`}
-                      className="text-xs font-medium underline text-mcmaster-maroon"
-                    >
-                      Join
-                    </Link>
-                  )}
-                  {isInstructor && (
-                    <a
-                      href={`/api/attendance/export?liveSessionId=${s.id}`}
-                      className="text-xs underline text-slate-600"
-                    >
-                      Export CSV
-                    </a>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       {status && <p className="mt-4 text-sm text-slate-700">{status}</p>}
     </div>
   );
 }
-

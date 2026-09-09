@@ -4,26 +4,29 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "npx tsx prisma/seed.ts",
-    "realtime": "npx tsx server/realtime-server.ts"
+    "prisma:seed": "tsx prisma/seed.ts",
+    "realtime": "tsx server/realtime-server.ts",
+    "dev:all": "concurrently -n next,realtime -c cyan,magenta \"npm run dev\" \"npm run realtime\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prisma:deploy": "prisma migrate deploy",
+    "setup": "prisma migrate deploy && prisma generate && tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "5.10.0",
-    "@tanstack/react-query": "^5.20.0",
     "argon2": "^0.31.0",
     "clsx": "^2.1.0",
     "cookie": "^0.6.0",
-    "csurf": "^1.11.0",
-    "date-fns": "^3.6.0",
     "jose": "^6.2.1",
     "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.400.0",
     "next": "14.1.0",
-    "next-themes": "^0.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "socket.io": "^4.7.5",
@@ -31,19 +34,26 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/cookie": "^0.6.0",
     "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
-    "@types/socket.io": "^3.0.2",
-    "@types/socket.io-client": "^3.0.0",
     "autoprefixer": "^10.4.24",
+    "concurrently": "^8.2.2",
     "eslint": "^8.56.0",
     "eslint-config-next": "14.1.0",
     "postcss": "^8.5.6",
     "prisma": "5.10.0",
     "tailwindcss": "^3.4.19",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.0"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "engines": {
+    "node": ">=18.18"
   }
 }

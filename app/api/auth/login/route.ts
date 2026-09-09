@@ -1,32 +1,25 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { verifyPassword, setSessionCookie, clearSessionCookies } from "@/lib/auth";
-import { loginSchema } from "@/lib/validation";
+import { clearSessionCookies, setSessionCookie, verifyPassword } from "@/lib/auth";
+import { ApiError, Errors, route } from "@/lib/api";
 import { rateLimit } from "@/lib/rateLimit";
+import { loginSchema } from "@/lib/validation";
 
-export async function POST(req: NextRequest) {
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  const rl = rateLimit(`login:${ip}`, 20, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+export const POST = route({ body: loginSchema }, async ({ body }) => {
+  const { email, password } = body;
+
+  // Keyed per account, not per IP: a lecture hall shares one campus NAT
+  // address and per-IP throttling would lock out the whole class.
+  if (!rateLimit(`login:${email}`, 10, 60_000).ok) {
+    throw Errors.tooMany("Too many sign-in attempts. Try again in a minute.");
   }
 
-  const json = await req.json().catch(() => null);
-  const parsed = loginSchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-  const { email, password } = parsed.data;
+  const invalid = new ApiError(401, "Invalid email or password.");
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !user.passwordHash) {
-    return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
-  }
-
-  const ok = await verifyPassword(user.passwordHash, password);
-  if (!ok) {
-    return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
-  }
+  if (!user) throw invalid;
+  if (!(await verifyPassword(user.password, password))) throw invalid;
+  if (user.suspended) throw Errors.forbidden("This account has been suspended.");
 
   clearSessionCookies();
   const { csrfToken } = setSessionCookie({
@@ -35,11 +28,14 @@ export async function POST(req: NextRequest) {
     email: user.email
   });
 
-  return NextResponse.json(
-    {
-      user: { id: user.id, email: user.email, role: user.role, verifiedAt: user.verifiedAt },
-      csrfToken
+  return NextResponse.json({
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      emailVerified: user.emailVerified
     },
-    { status: 200 }
-  );
-}
+    csrfToken
+  });
+});

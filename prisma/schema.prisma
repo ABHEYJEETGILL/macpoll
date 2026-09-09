@@ -1,5 +1,4 @@
-// MacPoll Prisma Schema — Prisma 7
-// Connection URL is in prisma.config.js
+// MacPoll Prisma Schema
 
 generator client {
   provider = "prisma-client-js"
@@ -7,6 +6,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 enum Role {
@@ -111,7 +111,7 @@ model ClassSession {
   @@index([isActive])
 }
 
-// Reusable question bank — owned by instructor, not tied to a course
+// Reusable question bank - owned by instructor, not tied to a course
 model Question {
   id                    String   @id @default(cuid())
   title                 String
@@ -158,7 +158,7 @@ model Poll {
   // Image attached to this poll question
   imageUrl String?
 
-  // When false: students see "A poll is running — look at the screen"
+  // When false: students see "A poll is running - look at the screen"
   // instead of the question text and image on their device.
   // Useful when the instructor wants to project the question.
   showContentToStudents Boolean @default(true)
@@ -201,7 +201,7 @@ model PollOption {
   @@index([pollId])
 }
 
-// Final response — one per student per poll (enforced by unique constraint)
+// Final response - one per student per poll (enforced by unique constraint)
 model PollResponse {
   id          String   @id @default(cuid())
   shortAnswer String?
@@ -221,7 +221,7 @@ model PollResponse {
   @@index([studentId])
 }
 
-// Audit log — every vote attempt, timestamps preserved, never overwritten
+// Audit log - every vote attempt, timestamps preserved, never overwritten
 model PollResponseLog {
   id          String   @id @default(cuid())
   shortAnswer String?

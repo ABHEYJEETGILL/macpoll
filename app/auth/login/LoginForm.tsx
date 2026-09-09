@@ -1,46 +1,46 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { ApiRequestError, apiFetch } from "@/lib/client/api";
+
+/** Only same-origin paths, so `?next=` cannot bounce a user off-site. */
+function safeNext(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/dashboard";
+  return raw;
+}
 
 export default function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetch("/api/auth/me")
-      .then(r => r.json())
-      .then(data => {
+    apiFetch<{ user: unknown }>("/api/auth/me")
+      .then((data) => {
         if (data.user) router.replace("/dashboard");
-      });
-  }, []);
+      })
+      .catch(() => {});
+  }, [router]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
     setStatus(null);
     try {
-      const res = await fetch("/api/auth/login", {
+      await apiFetch("/api/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password })
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setStatus(data.error ?? "Login failed");
-      } else {
-        const params = new URLSearchParams(window.location.search);
-        const next = params.get("next") ?? "/dashboard";
-        router.push(next);
-      }
-    } catch {
-      setStatus("Unexpected error");
-    } finally {
+      router.push(safeNext(searchParams.get("next")));
+      router.refresh();
+    } catch (err) {
+      setStatus(err instanceof ApiRequestError ? err.message : "Could not sign in.");
       setLoading(false);
     }
   }
@@ -71,4 +71,3 @@ export default function LoginForm() {
     </div>
   );
 }
-

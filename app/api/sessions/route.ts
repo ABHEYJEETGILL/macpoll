@@ -1,62 +1,42 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { auth } from '@/lib/auth'
-import { prisma } from '@/lib/prisma'
-import { z } from 'zod'
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { Errors, route } from "@/lib/api";
+import { isEnrolledInCourse, requireInstructorForCourse } from "@/lib/permissions";
+import { classSessionCreateSchema } from "@/lib/validation";
 
-const CreateSessionSchema = z.object({
-  courseId:    z.string().cuid(),
-  title:       z.string().min(2).max(120),
-  description: z.string().max(500).optional(),
-  date:        z.string().datetime().optional(),
-})
+export const GET = route({ roles: "any" }, async ({ req, user }) => {
+  const courseId = req.nextUrl.searchParams.get("courseId");
+  if (!courseId) throw Errors.badRequest("courseId is required.");
 
-// GET /api/sessions?courseId=xxx
-export async function GET(req: NextRequest) {
-  const session = await auth()
-  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const courseId = req.nextUrl.searchParams.get('courseId')
-  if (!courseId) return NextResponse.json({ error: 'courseId required.' }, { status: 400 })
+  // Previously any signed-in user could read any course's sessions.
+  if (!(await isEnrolledInCourse(user.id, courseId))) {
+    throw Errors.forbidden("You are not enrolled in this course.");
+  }
 
   const sessions = await prisma.classSession.findMany({
-    where:   { courseId },
-    include: {
-      polls: {
-        include: { _count: { select: { responses: true } } },
-        orderBy: { orderIndex: 'asc' },
-      },
-      _count: { select: { polls: true } },
-    },
-    orderBy: { date: 'desc' },
-  })
-
-  return NextResponse.json(sessions)
-}
-
-// POST /api/sessions — instructor creates a session
-export async function POST(req: NextRequest) {
-  const session = await auth()
-  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  if (session.user.role !== 'INSTRUCTOR') return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-
-  const body   = await req.json()
-  const result = CreateSessionSchema.safeParse(body)
-  if (!result.success) return NextResponse.json({ error: result.error.errors[0].message }, { status: 400 })
-
-  const { courseId, title, description, date } = result.data
-
-  const course = await prisma.course.findFirst({ where: { id: courseId, instructorId: session.user.id } })
-  if (!course) return NextResponse.json({ error: 'Course not found.' }, { status: 403 })
-
-  const classSession = await prisma.classSession.create({
-    data: {
-      courseId,
-      title,
-      description,
-      date: date ? new Date(date) : new Date(),
-    },
+    where: { courseId },
     include: { _count: { select: { polls: true } } },
-  })
+    orderBy: { date: "desc" }
+  });
+  return NextResponse.json(sessions);
+});
 
-  return NextResponse.json(classSession, { status: 201 })
-}
+export const POST = route(
+  { roles: ["INSTRUCTOR", "ADMIN"], body: classSessionCreateSchema },
+  async ({ user, body }) => {
+    const course = await requireInstructorForCourse(user.id, body.courseId);
+    if (!course) throw Errors.forbidden("You do not own this course.");
+
+    const session = await prisma.classSession.create({
+      data: {
+        courseId: body.courseId,
+        title: body.title,
+        description: body.description,
+        date: body.date ? new Date(body.date) : new Date()
+      },
+      include: { _count: { select: { polls: true } } }
+    });
+
+    return NextResponse.json(session, { status: 201 });
+  }
+);

@@ -1,60 +1,53 @@
 "use client";
- 
-import { FormEvent, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
- 
-export default function StudentJoinPage() {
+import { ApiRequestError, apiFetch } from "@/lib/client/api";
+
+export default function JoinCoursePage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const [sessionCode, setSessionCode] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
- 
-  async function handleJoin(e: FormEvent) {
+  const [joinCode, setJoinCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleJoin(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
-    setStatus(null);
+    setError(null);
+    setBusy(true);
     try {
-      const res = await fetch("/api/sessions/join", {
+      const course = await apiFetch<{ id: string }>("/api/courses/join", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionCode: sessionCode.toUpperCase() })
+        body: JSON.stringify({ joinCode })
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setStatus(data.error ?? "Could not join session");
-      } else {
-        router.push(`/student/session/${data.session.id}`);
-      }
-    } catch {
-      setStatus("Unexpected error");
-    } finally {
-      setLoading(false);
+      router.push(`/student/courses/${course.id}`);
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : "Could not join that course.");
+      setBusy(false);
     }
   }
- 
+
   return (
-    <div className="max-w-md px-4 py-10 mx-auto">
-      <h1 className="mb-2 text-2xl font-semibold text-mcmaster-maroon">Join a live session</h1>
-      <p className="mb-6 text-sm text-slate-600">
-        Enter the 6-character session code your instructor displayed.
+    <div className="max-w-md px-4 py-12 mx-auto">
+      <h1 className="text-2xl font-semibold text-mcmaster-maroon">Join a course</h1>
+      <p className="mt-1 text-sm text-slate-600">
+        Enter the join code your instructor shared.
       </p>
-      <form onSubmit={handleJoin} className="space-y-4">
+
+      <form onSubmit={handleJoin} className="mt-6 space-y-4">
         <Input
-          label="Session code"
-          value={sessionCode}
-          onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
-          placeholder="e.g. AB1C2D"
-          maxLength={8}
-          required
+          label="Join code"
+          value={joinCode}
+          onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+          placeholder="ABC123"
+          autoFocus
         />
-        <Button type="submit" disabled={loading || sessionCode.length < 4} className="w-full">
-          {loading ? "Joining..." : "Join session"}
+        {error && <p className="text-sm text-red-600">{error}</p>}
+        <Button type="submit" className="w-full" disabled={busy || !joinCode}>
+          {busy ? "Joining..." : "Join course"}
         </Button>
       </form>
-      {status && <p className="mt-4 text-sm text-red-600">{status}</p>}
     </div>
   );
 }
